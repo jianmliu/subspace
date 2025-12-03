@@ -311,6 +311,10 @@ impl pallet_subspace::Config for Runtime {
     type WeightInfo = weights::pallet_subspace::WeightInfo<Runtime>;
     type BlockSlotCount = BlockSlotCount;
     type ExtensionWeightInfo = weights::pallet_subspace_extension::WeightInfo<Runtime>;
+    type VotingRewardCurrency = Balances;
+    type MinVotingBalance = ExistentialDeposit;
+    type MaxVotingBalance = MaxVoterBalance;
+    type VotingStakeProvider = VotingStake;
 }
 
 impl pallet_timestamp::Config for Runtime {
@@ -329,6 +333,11 @@ parameter_types! {
     // Storage duration (1 year) - It is theoretically unlimited, accounts will stay around while the chain is alive.
     // Storage cost per year of (12 * 1e-9 * 0.1 ) - SSD storage on cloud hosting costs about 0.1 USD per Gb per month
     pub const ExistentialDeposit: Balance = 10_000_000_000_000 * SHANNON;
+    pub const MaxVoterBalance: Balance = Balance::MAX;
+    pub const VotingStakeMin: Balance = ExistentialDeposit::get();
+    pub const VotingStakeMax: Balance = Balance::MAX;
+    pub const VotingStakeHoldReason: HoldIdentifierWrapper =
+        HoldIdentifierWrapper(HoldIdentifier::VotingStake);
 }
 
 #[derive(
@@ -377,6 +386,15 @@ impl pallet_balances::Config for Runtime {
     type MaxFreezes = ();
     type RuntimeHoldReason = HoldIdentifierWrapper;
     type DoneSlashHandler = ();
+}
+
+impl pallet_voting_stake::Config for Runtime {
+    type RuntimeEvent = RuntimeEvent;
+    type Balance = Balance;
+    type Currency = Balances;
+    type HoldReason = VotingStakeHoldReason;
+    type MinStake = VotingStakeMin;
+    type MaxStake = VotingStakeMax;
 }
 
 parameter_types! {
@@ -1100,6 +1118,7 @@ construct_runtime!(
         TransactionFees: pallet_transaction_fees = 6,
         TransactionPayment: pallet_transaction_payment = 7,
         Utility: pallet_utility = 8,
+        VotingStake: pallet_voting_stake = 9,
 
         Domains: pallet_domains = 12,
         RuntimeConfigs: pallet_runtime_configs = 14,

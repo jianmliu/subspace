@@ -307,6 +307,8 @@ parameter_types! {
     pub const MinSectorLifetime: HistorySize = HistorySize::new(NonZeroU64::new(4).unwrap());
     pub const BlockSlotCount: u32 = 6;
     pub TransactionWeightFee: Balance = 100_000 * SHANNON;
+    pub const MinVotingBalance: Balance = 10_000_000_000_000 * SHANNON;
+    pub const MaxVotingBalance: Balance = Balance::MAX;
 }
 
 impl pallet_subspace::Config for Runtime {
@@ -330,6 +332,10 @@ impl pallet_subspace::Config for Runtime {
     type WeightInfo = pallet_subspace::weights::SubstrateWeight<Runtime>;
     type BlockSlotCount = BlockSlotCount;
     type ExtensionWeightInfo = pallet_subspace::extensions::weights::SubstrateWeight<Runtime>;
+    type VotingRewardCurrency = Balances;
+    type MinVotingBalance = MinVotingBalance;
+    type MaxVotingBalance = MaxVotingBalance;
+    type VotingStakeProvider = VotingStake;
 }
 
 impl pallet_timestamp::Config for Runtime {
@@ -369,6 +375,13 @@ impl VariantCount for HoldIdentifierWrapper {
     const VARIANT_COUNT: u32 = mem::variant_count::<HoldIdentifier>() as u32;
 }
 
+parameter_types! {
+    pub const VotingStakeMin: Balance = 10_000_000_000_000 * SHANNON;
+    pub const VotingStakeMax: Balance = Balance::MAX;
+    pub const VotingStakeHoldReason: HoldIdentifierWrapper =
+        HoldIdentifierWrapper(HoldIdentifier::VotingStake);
+}
+
 impl pallet_balances::Config for Runtime {
     type RuntimeFreezeReason = RuntimeFreezeReason;
     type MaxLocks = ConstU32<50>;
@@ -386,6 +399,15 @@ impl pallet_balances::Config for Runtime {
     type MaxFreezes = ();
     type RuntimeHoldReason = HoldIdentifierWrapper;
     type DoneSlashHandler = ();
+}
+
+impl pallet_voting_stake::Config for Runtime {
+    type RuntimeEvent = RuntimeEvent;
+    type Balance = Balance;
+    type Currency = Balances;
+    type HoldReason = VotingStakeHoldReason;
+    type MinStake = VotingStakeMin;
+    type MaxStake = VotingStakeMax;
 }
 
 pub struct CreditSupply;
@@ -1042,6 +1064,7 @@ construct_runtime!(
         Timestamp: pallet_timestamp = 1,
 
         Subspace: pallet_subspace = 2,
+        VotingStake: pallet_voting_stake = 3,
         Rewards: pallet_rewards = 9,
 
         Balances: pallet_balances = 4,

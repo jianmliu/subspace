@@ -38,6 +38,7 @@ frame_support::construct_runtime!(
         System: frame_system,
         Timestamp: pallet_timestamp,
         Balances: pallet_balances,
+        VotingStake: pallet_voting_stake,
         Subspace: pallet_subspace,
         Domains: pallet_domains,
         DomainExecutive: domain_pallet_executive,
@@ -303,6 +304,24 @@ impl pallet_block_fees::Config for Test {
     type DomainChainByteFee = DomainChainByteFee;
 }
 
+parameter_types! {
+    pub const VotingStakeMin: Balance = AI3;
+    pub const VotingStakeMax: Balance = Balance::MAX;
+    pub const VotingStakeHoldReason: HoldIdentifierWrapper =
+        HoldIdentifierWrapper(HoldIdentifier::VotingStake);
+    pub const MinVotingBalance: Balance = AI3;
+    pub const MaxVotingBalance: Balance = Balance::MAX;
+}
+
+impl pallet_voting_stake::Config for Test {
+    type RuntimeEvent = RuntimeEvent;
+    type Balance = Balance;
+    type Currency = Balances;
+    type HoldReason = VotingStakeHoldReason;
+    type MinStake = VotingStakeMin;
+    type MaxStake = VotingStakeMax;
+}
+
 pub const INITIAL_SOLUTION_RANGE: SolutionRange =
     u64::MAX / (1024 * 1024 * 1024 / Piece::SIZE as u64) * 3 / 10;
 
@@ -349,6 +368,10 @@ impl pallet_subspace::Config for Test {
     type WeightInfo = ();
     type BlockSlotCount = BlockSlotCount;
     type ExtensionWeightInfo = pallet_subspace::extensions::weights::SubstrateWeight<Self>;
+    type VotingRewardCurrency = Balances;
+    type MinVotingBalance = MinVotingBalance;
+    type MaxVotingBalance = MaxVotingBalance;
+    type VotingStakeProvider = VotingStake;
 }
 
 #[derive(Debug, Decode, Encode, TypeInfo, PartialEq, Eq, Clone, Copy)]

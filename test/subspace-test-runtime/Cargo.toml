@@ -30,6 +30,7 @@ pallet-rewards.workspace = true
 pallet-runtime-configs.workspace = true
 pallet-subspace = { workspace = true, features = ["serde"] }
 pallet-subspace-mmr.workspace = true
+pallet-voting-stake.workspace = true
 pallet-sudo.workspace = true
 pallet-timestamp.workspace = true
 pallet-transaction-fees.workspace = true
@@ -86,6 +87,7 @@ std = [
     "pallet-runtime-configs/std",
     "pallet-subspace/std",
     "pallet-subspace-mmr/std",
+    "pallet-voting-stake/std",
     "pallet-sudo/std",
     "pallet-timestamp/std",
     "pallet-transaction-fees/std",

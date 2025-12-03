@@ -248,9 +248,14 @@ pub trait FindBlockRewardAddress<RewardAddress> {
 }
 
 /// A trait for finding the addresses for voting reward based on transactions found in the block.
-pub trait FindVotingRewardAddresses<RewardAddress> {
-    /// Find the addresses for voting rewards based on transactions found in the block.
-    fn find_voting_reward_addresses() -> Vec<RewardAddress>;
+pub trait FindVotingRewardAddresses<RewardAddress, Weight> {
+    /// Find the addresses and weights for voting rewards based on transactions found in the block.
+    fn find_voting_reward_addresses() -> Vec<(RewardAddress, Weight)>;
+}
+
+/// Provider of dedicated voting stake.
+pub trait VotingStakeProvider<AccountId, Balance> {
+    fn voting_stake(account: &AccountId) -> Balance;
 }
 
 pub trait StorageFee<Balance> {
@@ -335,6 +340,7 @@ pub enum HoldIdentifier {
     DomainStorageFund,
     MessengerChannel,
     Preimage,
+    VotingStake,
 }
 
 /// Interface for creating an unsigned general extrinsic

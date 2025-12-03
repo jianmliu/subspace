@@ -1,5 +1,6 @@
-use crate::RewardPoint;
+use crate::{RemainingIssuance, RewardPoint, VoterSubsidyPoints};
 use crate::mock::Test;
+use frame_support::BoundedVec;
 
 type Pallet = crate::Pallet<Test>;
 
@@ -114,4 +115,40 @@ fn correct_block_vote_reward() {
         Pallet::vote_reward(&points, last_point.block + 1),
         last_point.subsidy
     );
+}
+
+#[test]
+fn vote_rewards_are_weighted() {
+    use crate::mock::{new_test_ext, MOCK_VOTERS};
+    use frame_support::traits::Hooks;
+    use pallet_balances::Pallet as Balances;
+
+    new_test_ext().execute_with(|| {
+        // Two voters with different balances acting as weights
+        MOCK_VOTERS.with(|v| {
+            *v.borrow_mut() = vec![(1, 1), (2, 3)];
+        });
+
+        // Configure subsidy so vote reward is non-zero
+        let points: BoundedVec<_, _> = vec![RewardPoint {
+            block: 0,
+            subsidy: 100,
+        }]
+        .try_into()
+        .unwrap();
+        VoterSubsidyPoints::<Test>::put(points);
+        RemainingIssuance::<Test>::put(1_000);
+
+        // Run finalization to issue rewards
+        frame_system::Pallet::<Test>::set_block_number(1);
+        Pallet::on_finalize(1);
+
+        // Total vote reward per vote is 100 with 10% proposer tax; no block author so tax is added
+        // back to voters. Total voter pool: 200, split 1:3.
+        assert_eq!(Balances::<Test>::free_balance(&1), 50);
+        assert_eq!(Balances::<Test>::free_balance(&2), 150);
+
+        // Clean up for other tests
+        MOCK_VOTERS.with(|v| v.borrow_mut().clear());
+    });
 }

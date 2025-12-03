@@ -21,6 +21,7 @@ hex-literal = { workspace = true, optional = true }
 log.workspace = true
 pallet-balances.workspace = true
 pallet-subspace = { workspace = true, optional = true }
+pallet-voting-stake.workspace = true
 scale-info = { workspace = true, features = ["derive"] }
 schnorrkel = { workspace = true, optional = true }
 sp-consensus-slots.workspace = true
@@ -50,6 +51,7 @@ sp-state-machine = { workspace = true, optional = true, default-features = true 
 domain-pallet-executive.workspace = true
 hex-literal.workspace = true
 pallet-subspace.workspace = true
+pallet-voting-stake.workspace = true
 pallet-timestamp.workspace = true
 pallet-block-fees.workspace = true
 prop-test.workspace = true
@@ -67,6 +69,7 @@ std = [
     "log/std",
     "pallet-balances/std",
     "pallet-subspace/std",
+    "pallet-voting-stake/std",
     "scale-info/std",
     "sp-consensus-slots/std",
     "sp-consensus-subspace/std",
