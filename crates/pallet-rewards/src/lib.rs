@@ -21,7 +21,7 @@ pub use pallet::*;
 use serde::{Deserialize, Serialize};
 use sp_core::U256;
 use sp_runtime::Saturating;
-use sp_runtime::traits::{CheckedSub, Zero};
+use sp_runtime::traits::{CheckedSub, One, Zero};
 use sp_runtime::Vec;
 use subspace_runtime_primitives::{BlockNumber, FindBlockRewardAddress, FindVotingRewardAddresses};
 pub use weights::WeightInfo;
@@ -280,23 +280,32 @@ impl<T: Config> Pallet<T> {
             // Issue reward later once all voters were taxed
         }
 
-        let voters = T::FindVotingRewardAddresses::find_voting_reward_addresses();
-        if !voters.is_empty() {
-            let vote_reward = Self::vote_reward(&VoterSubsidyPoints::<T>::get(), block_number);
-            // Tax voter
-            let proposer_tax = vote_reward / T::ProposerTaxOnVotes::get().1.into()
-                * T::ProposerTaxOnVotes::get().0.into();
-            // Subtract tax from vote reward
-            let vote_reward = vote_reward - proposer_tax;
+            let voters = T::FindVotingRewardAddresses::find_voting_reward_addresses();
+            if !voters.is_empty() {
+                let vote_reward = Self::vote_reward(&VoterSubsidyPoints::<T>::get(), block_number);
+                // Tax voter
+                let proposer_tax = vote_reward / T::ProposerTaxOnVotes::get().1.into()
+                    * T::ProposerTaxOnVotes::get().0.into();
+                // Subtract tax from vote reward
+                let vote_reward = vote_reward - proposer_tax;
 
-            let voter_count: BalanceOf<T> = BalanceOf::<T>::from(voters.len() as u32);
-            let voter_reward_pool = vote_reward.saturating_mul(voter_count);
-            let proposer_tax_total = proposer_tax.saturating_mul(voter_count);
+                let voter_count: BalanceOf<T> = BalanceOf::<T>::from(voters.len() as u32);
+                let voter_reward_pool = vote_reward.saturating_mul(voter_count);
+                let proposer_tax_total = proposer_tax.saturating_mul(voter_count);
 
-            let weighted_voters: Vec<_> = voters
-                .into_iter()
-                .filter(|(_voter, weight)| !weight.is_zero())
-                .collect();
+                let any_nonzero = voters.iter().any(|(_, weight)| !weight.is_zero());
+                let weighted_voters: Vec<_> = if any_nonzero {
+                    voters
+                        .into_iter()
+                        .filter(|(_voter, weight)| !weight.is_zero())
+                        .collect()
+                } else {
+                    // All weights are zero: fall back to equal share across voters.
+                    voters
+                        .into_iter()
+                        .map(|(voter, _)| (voter, BalanceOf::<T>::one()))
+                        .collect()
+                };
 
             let total_weight = weighted_voters.iter().fold(
                 BalanceOf::<T>::zero(),
