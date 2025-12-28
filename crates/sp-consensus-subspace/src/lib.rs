@@ -9,6 +9,7 @@ pub mod digests;
 pub mod inherents;
 
 use alloc::borrow::Cow;
+use integer_sqrt::IntegerSquareRoot;
 #[cfg(not(feature = "std"))]
 use alloc::string::String;
 #[cfg(not(feature = "std"))]
@@ -82,6 +83,29 @@ impl SubspaceJustification {
             SubspaceJustification::PotCheckpoints { .. } => true,
         }
     }
+}
+
+/// Convert stake to voting weight using a non-linear function.
+#[inline]
+pub fn stake_to_weight(stake: u128) -> u128 {
+    stake.integer_sqrt()
+}
+
+/// Scale solution range by voting weight.
+#[inline]
+pub fn scale_solution_range(
+    base_range: SolutionRange,
+    weight: u128,
+    max_weight: u128,
+) -> SolutionRange {
+    if max_weight == 0 {
+        return base_range;
+    }
+
+    let scaled = (u128::from(base_range) * weight) / max_weight;
+    scaled
+        .try_into()
+        .unwrap_or(SolutionRange::MAX)
 }
 
 /// Next slot input for proof of time evaluation
@@ -574,7 +598,7 @@ impl PotParameters {
 
 sp_api::decl_runtime_apis! {
     /// API necessary for block authorship with Subspace.
-    #[api_version(2)]
+    #[api_version(3)]
     pub trait SubspaceApi<RewardAddress: Encode + Decode> {
         /// Proof of time parameters
         fn pot_parameters() -> PotParameters;
@@ -615,6 +639,12 @@ sp_api::decl_runtime_apis! {
 
         /// Get Subspace blockchain constants
         fn chain_constants() -> ChainConstants;
+
+        /// Voting stake weight (non-linear, clamped) for reward address.
+        fn voting_stake_weight(reward_address: RewardAddress) -> u128;
+
+        /// Maximum voting stake weight for scaling.
+        fn max_voting_stake_weight() -> u128;
 
         /// Returns the consumed weight of the block.
         /// Available from api_version >= 2

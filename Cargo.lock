@@ -12495,6 +12495,7 @@ name = "sp-consensus-subspace"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "integer-sqrt",
  "log",
  "parity-scale-codec",
  "scale-info",

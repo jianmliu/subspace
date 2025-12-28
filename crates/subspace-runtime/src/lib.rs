@@ -1506,6 +1506,15 @@ impl_runtime_apis! {
             }
         }
 
+        fn voting_stake_weight(reward_address: PublicKey) -> u128 {
+            let account_id: AccountId32 = RewardAddress::from(reward_address).into();
+            pallet_subspace::Pallet::<Runtime>::voting_stake_weight(&account_id)
+        }
+
+        fn max_voting_stake_weight() -> u128 {
+            pallet_subspace::Pallet::<Runtime>::max_voting_stake_weight()
+        }
+
         fn block_weight() -> Weight {
             System::block_weight().total()
         }

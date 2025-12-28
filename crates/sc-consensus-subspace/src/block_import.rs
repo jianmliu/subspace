@@ -31,7 +31,9 @@ use sp_consensus_slots::Slot;
 use sp_consensus_subspace::digests::{
     SubspaceDigestItems, extract_pre_digest, extract_subspace_digest_items,
 };
-use sp_consensus_subspace::{PotNextSlotInput, SubspaceApi, SubspaceJustification};
+use sp_consensus_subspace::{
+    PotNextSlotInput, SubspaceApi, SubspaceJustification, scale_solution_range,
+};
 use sp_inherents::{CreateInherentDataProviders, InherentDataProvider};
 use sp_runtime::Justifications;
 use sp_runtime::traits::{Block as BlockT, Header as HeaderT, NumberFor, One};
@@ -500,6 +502,16 @@ where
             .map(|segment_header| segment_header.segment_commitment())
             .ok_or(Error::SegmentCommitmentNotFound(segment_index))?;
 
+        let runtime_api = self.client.runtime_api();
+        let max_voting_weight = runtime_api.max_voting_stake_weight(parent_hash)?;
+        let voter_weight =
+            runtime_api.voting_stake_weight(parent_hash, pre_digest.solution().reward_address)?;
+        let scaled_solution_range = scale_solution_range(
+            subspace_digest_items.solution_range,
+            voter_weight,
+            max_voting_weight,
+        );
+
         let sector_expiration_check_segment_commitment = self
             .segment_headers_store
             .get_segment_header(
@@ -521,14 +533,14 @@ where
             pre_digest.slot().into(),
             &VerifySolutionParams {
                 proof_of_time: subspace_digest_items.pre_digest.pot_info().proof_of_time(),
-                solution_range: subspace_digest_items.solution_range,
+                solution_range: scaled_solution_range,
                 piece_check_params: Some(PieceCheckParams {
                     max_pieces_in_sector,
                     segment_commitment,
                     recent_segments: chain_constants.recent_segments(),
                     recent_history_fraction: chain_constants.recent_history_fraction(),
                     min_sector_lifetime: chain_constants.min_sector_lifetime(),
-                    current_history_size: self.client.runtime_api().history_size(parent_hash)?,
+                    current_history_size: runtime_api.history_size(parent_hash)?,
                     sector_expiration_check_segment_commitment,
                 }),
             },

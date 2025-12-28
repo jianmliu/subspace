@@ -6,6 +6,7 @@ use frame_support::pallet_prelude::*;
 use frame_support::traits::fungible::{Inspect, InspectHold, MutateHold};
 use frame_support::traits::tokens::Precision;
 use frame_system::pallet_prelude::*;
+use sp_runtime::Saturating;
 use sp_runtime::traits::{AtLeast32BitUnsigned, Zero};
 use subspace_runtime_primitives::VotingStakeProvider;
 
@@ -50,6 +51,10 @@ pub mod pallet {
     pub type VotingStake<T: Config> =
         StorageMap<_, Twox64Concat, T::AccountId, T::Balance, ValueQuery>;
 
+    #[pallet::storage]
+    #[pallet::getter(fn total_stake)]
+    pub type TotalStake<T: Config> = StorageValue<_, T::Balance, ValueQuery>;
+
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
     pub enum Event<T: Config> {
@@ -79,16 +84,19 @@ pub mod pallet {
 
             let current = VotingStake::<T>::get(&who);
             let hold_reason = T::HoldReason::get();
+            let total_before = TotalStake::<T>::get();
 
             match amount.cmp(&current) {
                 core::cmp::Ordering::Greater => {
                     let delta = amount - current;
                     T::Currency::hold(&hold_reason, &who, delta).map_err(|_| Error::<T>::HoldFailed)?;
+                    TotalStake::<T>::put(total_before.saturating_add(delta));
                 }
                 core::cmp::Ordering::Less => {
                     let delta = current - amount;
                     T::Currency::release(&hold_reason, &who, delta, Precision::Exact)
                         .map_err(|_| Error::<T>::ReleaseFailed)?;
+                    TotalStake::<T>::put(total_before.saturating_sub(delta));
                 }
                 core::cmp::Ordering::Equal => return Ok(()),
             }
@@ -108,5 +116,9 @@ pub mod pallet {
 impl<T: Config> VotingStakeProvider<T::AccountId, T::Balance> for pallet::Pallet<T> {
     fn voting_stake(account: &T::AccountId) -> T::Balance {
         pallet::VotingStake::<T>::get(account)
+    }
+
+    fn total_voting_stake() -> T::Balance {
+        pallet::TotalStake::<T>::get()
     }
 }

@@ -35,14 +35,15 @@ use sp_consensus_slots::Slot;
 use sp_consensus_subspace::consensus::{is_proof_of_time_valid, verify_solution};
 use sp_consensus_subspace::digests::CompatibleDigestItem;
 use sp_consensus_subspace::{
-    PotParameters, PotParametersChange, SignedVote, Vote, WrappedPotOutput,
+    PotParameters, PotParametersChange, SignedVote, Vote, WrappedPotOutput, scale_solution_range,
+    stake_to_weight,
 };
 use sp_runtime::Weight;
 
 type BalanceOf<T> =
     <<T as Config>::VotingRewardCurrency as Currency<<T as frame_system::Config>::AccountId>>::Balance;
 use sp_runtime::generic::DigestItem;
-use sp_runtime::traits::{BlockNumberProvider, CheckedSub, Hash, One, Zero};
+use sp_runtime::traits::{BlockNumberProvider, CheckedSub, Hash, One, SaturatedConversion, Zero};
 use sp_runtime::transaction_validity::{
     InvalidTransaction, TransactionPriority, TransactionSource, TransactionValidity,
     TransactionValidityError, ValidTransaction,
@@ -1317,6 +1318,35 @@ impl<T: Config> Pallet<T> {
             Err(error) => Err(error.into()),
         }
     }
+
+    pub fn max_voting_stake_weight() -> u128 {
+        let max_balance = T::MaxVotingBalance::get().saturated_into::<u128>();
+        stake_to_weight(max_balance)
+    }
+
+    pub fn voting_stake_weight(account_id: &T::AccountId) -> u128 {
+        let max_weight = Self::max_voting_stake_weight();
+        if max_weight == 0 {
+            return 0;
+        }
+
+        if T::VotingStakeProvider::total_voting_stake().is_zero() {
+            return max_weight;
+        }
+
+        let stake = T::VotingStakeProvider::voting_stake(account_id);
+        let min_balance = T::MinVotingBalance::get();
+        let max_balance = T::MaxVotingBalance::get();
+        let effective_stake = if stake < min_balance {
+            BalanceOf::<T>::zero()
+        } else if stake > max_balance {
+            max_balance
+        } else {
+            stake
+        };
+
+        stake_to_weight(effective_stake.saturated_into::<u128>())
+    }
 }
 
 /// Verification data retrieval depends on whether it is called from pre_dispatch (meaning block
@@ -1496,6 +1526,16 @@ fn check_vote<T: Config>(
         parent_vote_verification_data
     };
 
+    let max_weight = Pallet::<T>::max_voting_stake_weight();
+    let voter_weight = Pallet::<T>::voting_stake_weight(&solution.reward_address);
+    let scaled_solution_range =
+        scale_solution_range(vote_verification_data.solution_range, voter_weight, max_weight);
+    let scaled_vote_solution_range = scale_solution_range(
+        vote_verification_data.vote_solution_range,
+        voter_weight,
+        max_weight,
+    );
+
     let sector_id = SectorId::new(
         solution.public_key.hash(),
         solution.sector_index,
@@ -1539,7 +1579,7 @@ fn check_vote<T: Config>(
         slot.into(),
         (&VerifySolutionParams {
             proof_of_time: *proof_of_time,
-            solution_range: vote_verification_data.vote_solution_range,
+            solution_range: scaled_vote_solution_range,
             piece_check_params: Some(PieceCheckParams {
                 max_pieces_in_sector: T::MaxPiecesInSector::get(),
                 segment_commitment,
@@ -1553,7 +1593,7 @@ fn check_vote<T: Config>(
             .into(),
     ) {
         Ok(solution_distance) => {
-            if solution_distance <= vote_verification_data.solution_range / 2 {
+            if solution_distance <= scaled_solution_range / 2 {
                 debug!("Vote quality is too high");
                 return Err(CheckVoteError::QualityTooHigh);
             }

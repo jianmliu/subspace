@@ -256,6 +256,7 @@ pub trait FindVotingRewardAddresses<RewardAddress, Weight> {
 /// Provider of dedicated voting stake.
 pub trait VotingStakeProvider<AccountId, Balance> {
     fn voting_stake(account: &AccountId) -> Balance;
+    fn total_voting_stake() -> Balance;
 }
 
 pub trait StorageFee<Balance> {
