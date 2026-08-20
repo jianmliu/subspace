@@ -40,8 +40,9 @@ use sp_consensus_subspace::{
 };
 use sp_runtime::Weight;
 
-type BalanceOf<T> =
-    <<T as Config>::VotingRewardCurrency as Currency<<T as frame_system::Config>::AccountId>>::Balance;
+type BalanceOf<T> = <<T as Config>::VotingRewardCurrency as Currency<
+    <T as frame_system::Config>::AccountId,
+>>::Balance;
 use sp_runtime::generic::DigestItem;
 use sp_runtime::traits::{BlockNumberProvider, CheckedSub, Hash, One, SaturatedConversion, Zero};
 use sp_runtime::transaction_validity::{
@@ -1324,30 +1325,66 @@ impl<T: Config> Pallet<T> {
         stake_to_weight(max_balance)
     }
 
-    pub fn voting_stake_weight(account_id: &T::AccountId) -> u128 {
-        let max_weight = Self::max_voting_stake_weight();
+    /// Voter weight for a given stake, as a bounded continuous modulation of
+    /// the base solution range.
+    ///
+    /// Weight lives in `[floor, max_weight]` where `floor = max_weight *
+    /// MIN_VOTER_WEIGHT_BPS / 10000`. This is the fix for two chain-halting
+    /// behaviours of the naive `weight = sqrt(clamped_stake)` mapping (see
+    /// `docs/porw-code-review-followups.md`):
+    ///
+    /// - a capacity farmer with zero/low stake keeps a non-zero baseline
+    ///   weight (`floor`), so it is never excluded when someone else stakes
+    ///   — removing the discontinuous cliff at the first non-zero stake;
+    /// - because the mapping is anchored to `max_weight` (a finite,
+    ///   governance-set `MaxVotingBalance`, not `Balance::MAX`), a realistic
+    ///   stake yields a meaningful fraction of `max_weight` rather than a
+    ///   ~0 scale factor that collapses every solution range and stalls
+    ///   block production.
+    ///
+    /// Stake is a bounded bonus (up to `10000 / MIN_VOTER_WEIGHT_BPS`× the
+    /// floor), never a participation gate — matching the intent that
+    /// capacity gates and stake only shifts reward share.
+    pub fn voter_weight(stake: BalanceOf<T>, max_weight: u128) -> u128 {
         if max_weight == 0 {
             return 0;
         }
-
-        if T::VotingStakeProvider::total_voting_stake().is_zero() {
-            return max_weight;
-        }
-
-        let stake = T::VotingStakeProvider::voting_stake(account_id);
-        let min_balance = T::MinVotingBalance::get();
+        let floor = max_weight
+            .saturating_mul(MIN_VOTER_WEIGHT_BPS)
+            .saturating_div(10_000);
         let max_balance = T::MaxVotingBalance::get();
-        let effective_stake = if stake < min_balance {
-            BalanceOf::<T>::zero()
-        } else if stake > max_balance {
+        let clamped = if stake > max_balance {
             max_balance
         } else {
             stake
         };
+        // raw in [0, max_weight]; bonus in [0, max_weight - floor].
+        let raw = stake_to_weight(clamped.saturated_into::<u128>()).min(max_weight);
+        let bonus = max_weight
+            .saturating_sub(floor)
+            .saturating_mul(raw)
+            .saturating_div(max_weight);
+        floor.saturating_add(bonus).min(max_weight)
+    }
 
-        stake_to_weight(effective_stake.saturated_into::<u128>())
+    pub fn voting_stake_weight(account_id: &T::AccountId) -> u128 {
+        let max_weight = Self::max_voting_stake_weight();
+        // No stake anywhere: full weight for everyone (stake scaling is a
+        // no-op, block time unchanged). When the first stake appears,
+        // non-stakers drop only to the `floor` (a bounded change), never to
+        // zero — so nobody is ever excluded.
+        if T::VotingStakeProvider::total_voting_stake().is_zero() {
+            return max_weight;
+        }
+        let stake = T::VotingStakeProvider::voting_stake(account_id);
+        Self::voter_weight(stake, max_weight)
     }
 }
+
+/// Floor for a voter's weight, in basis points of `max_voting_stake_weight`.
+/// A capacity farmer with no stake gets this fraction of the base solution
+/// range; a maximally-staked voter gets the full base range. 5000 = 50%.
+const MIN_VOTER_WEIGHT_BPS: u128 = 5000;
 
 /// Verification data retrieval depends on whether it is called from pre_dispatch (meaning block
 /// initialization has already happened) or from `validate_unsigned` by transaction pool (meaning
@@ -1528,8 +1565,11 @@ fn check_vote<T: Config>(
 
     let max_weight = Pallet::<T>::max_voting_stake_weight();
     let voter_weight = Pallet::<T>::voting_stake_weight(&solution.reward_address);
-    let scaled_solution_range =
-        scale_solution_range(vote_verification_data.solution_range, voter_weight, max_weight);
+    let scaled_solution_range = scale_solution_range(
+        vote_verification_data.solution_range,
+        voter_weight,
+        max_weight,
+    );
     let scaled_vote_solution_range = scale_solution_range(
         vote_verification_data.vote_solution_range,
         voter_weight,
@@ -1688,10 +1728,11 @@ fn check_vote<T: Config>(
             } else {
                 Some(solution.reward_address.clone())
             };
-            let stake = reward_address.as_ref().map_or_else(
-                BalanceOf::<T>::zero,
-                |reward_address| T::VotingStakeProvider::voting_stake(reward_address),
-            );
+            let stake = reward_address
+                .as_ref()
+                .map_or_else(BalanceOf::<T>::zero, |reward_address| {
+                    T::VotingStakeProvider::voting_stake(reward_address)
+                });
             let min_balance = T::MinVotingBalance::get();
             let max_balance = T::MaxVotingBalance::get();
             let weight = if stake < min_balance {
@@ -1705,10 +1746,7 @@ fn check_vote<T: Config>(
             current_reward_receivers
                 .as_mut()
                 .expect("Always set during block initialization")
-                .insert(
-                    key,
-                    (reward_address, signed_vote.signature, weight),
-                );
+                .insert(key, (reward_address, signed_vote.signature, weight));
         });
     }
 
@@ -1821,8 +1859,7 @@ impl<T: Config> subspace_runtime_primitives::FindBlockRewardAddress<T::AccountId
     }
 }
 
-impl<T: Config>
-    subspace_runtime_primitives::FindVotingRewardAddresses<T::AccountId, BalanceOf<T>>
+impl<T: Config> subspace_runtime_primitives::FindVotingRewardAddresses<T::AccountId, BalanceOf<T>>
     for Pallet<T>
 {
     fn find_voting_reward_addresses() -> Vec<(T::AccountId, BalanceOf<T>)> {

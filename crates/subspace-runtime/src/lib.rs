@@ -333,9 +333,14 @@ parameter_types! {
     // Storage duration (1 year) - It is theoretically unlimited, accounts will stay around while the chain is alive.
     // Storage cost per year of (12 * 1e-9 * 0.1 ) - SSD storage on cloud hosting costs about 0.1 USD per Gb per month
     pub const ExistentialDeposit: Balance = 10_000_000_000_000 * SHANNON;
-    pub const MaxVoterBalance: Balance = Balance::MAX;
+    /// Weight denominator for stake-scaled solution ranges and the per-voter
+    /// stake cap. Governance placeholder: MUST be a realistic finite value —
+    /// `Balance::MAX` makes `sqrt(MAX)` the denominator and collapses every
+    /// scaled solution range to ~0 (chain halt). See
+    /// `docs/porw-code-review-followups.md`.
+    pub const MaxVoterBalance: Balance = 10_000_000 * AI3;
     pub const VotingStakeMin: Balance = ExistentialDeposit::get();
-    pub const VotingStakeMax: Balance = Balance::MAX;
+    pub const VotingStakeMax: Balance = 10_000_000 * AI3;
     pub const VotingStakeHoldReason: HoldIdentifierWrapper =
         HoldIdentifierWrapper(HoldIdentifier::VotingStake);
 }

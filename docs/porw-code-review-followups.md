@@ -13,27 +13,37 @@ resolution status.
 | 4 | `pallet-porw-registry` `ModelWithdrawn` | Event declared but no extrinsic — announcements could only be dropped by full deregistration; `ReplicaCount` overstated live replicas. | Added `withdraw_model` extrinsic (decrements replicas, gates further solutions). New test `withdraw_model_decrements_replicas_and_gates_solutions`. |
 | 5 | `pallet-porw-registry` `check_solution` | Activation-delay check used unchecked `+`. | `saturating_add`, consistent with the rest of the pallet. |
 
+## Fixed — chain-halting stake bugs (this branch)
+
+1. **`MaxVoterBalance = Balance::MAX` halted the chain once anyone staked.**
+   `max_voting_stake_weight` was `sqrt(u128::MAX) ≈ 1.8e19`; the first
+   non-zero stake collapsed every scaled solution range by ~1e5–1e9× and
+   stopped block production unrecoverably. **Fixed:** `MaxVoterBalance`
+   (subspace-runtime) and `MaxVotingBalance` (test-runtime) are now finite
+   governance placeholders (`10_000_000 * AI3` / equivalent SHANNON), and
+   `VotingStakeMax` matches.
+
+2. **Zero-stake→max, first-stake→zero exclusion cliff.**
+   `voting_stake_weight` returned `max_weight` at `TotalStake == 0` but
+   dropped every non-staker to `sqrt(0) = 0` (scaled range 0, permanent
+   exclusion) the instant anyone staked. **Fixed:** a shared
+   `Pallet::voter_weight(stake, max_weight)` maps stake to a bounded
+   continuous weight in `[floor, max_weight]` where
+   `floor = max_weight * MIN_VOTER_WEIGHT_BPS / 10000` (50%). No stake
+   anywhere is still a full-weight no-op; once staking is active a
+   non-staker drops only to the floor (a bounded ~2× range change), never
+   to zero. Stake is a bounded bonus, never a participation gate — matching
+   the intent that capacity gates and stake only shifts share. New test
+   `voter_weight_floors_and_never_excludes`; all 27 existing pallet-subspace
+   tests still pass; both runtimes' wasm builds pass.
+
+   Note (transient): when the very first stake appears, non-stakers' ranges
+   halve for up to one difficulty-adjustment era before the solution-range
+   adjustment re-centres block time. `MIN_VOTER_WEIGHT_BPS` and
+   `MaxVoterBalance` are the two knobs governance should calibrate against
+   real tokenomics.
+
 ## Open — in the merged PoS branch (author decision required)
-
-These pre-date the PoRW work; they live in the `origin/PoS` code merged
-into this branch and touch consensus-critical stake math. Flagging rather
-than changing unilaterally.
-
-1. **`MaxVoterBalance = Balance::MAX` halts the chain once anyone stakes.**
-   `crates/subspace-runtime/src/lib.rs` (and the same in
-   `test/subspace-test-runtime`). `max_voting_stake_weight` becomes
-   `sqrt(u128::MAX) ≈ 1.8e19`; the first non-zero stake collapses every
-   farmer's scaled solution range by ~1e5–1e9×, so no solution qualifies
-   and block production stops — and since unstaking needs a block, it is
-   unrecoverable. **Suggested fix:** set `MaxVotingBalance` to a realistic
-   cap (e.g. total issuance or a governance parameter), not `Balance::MAX`.
-
-2. **Zero-stake grants maximum weight, not a neutral baseline.**
-   `pallet-subspace` `voting_stake_weight` returns `max_weight` for every
-   voter while `TotalStake == 0`. The instant one account stakes the
-   minimum, all non-stakers drop to `sqrt(0) = 0` weight (scaled range 0,
-   permanent exclusion) — a discontinuous cliff a single actor can trigger
-   to monopolize production. Ties into #1.
 
 3. **Reward split saturates with realistic stakes.** `pallet-rewards`
    computes `total_voter_pool.saturating_mul(weight) / total_weight` in

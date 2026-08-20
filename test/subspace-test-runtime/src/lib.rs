@@ -308,7 +308,8 @@ parameter_types! {
     pub const BlockSlotCount: u32 = 6;
     pub TransactionWeightFee: Balance = 100_000 * SHANNON;
     pub const MinVotingBalance: Balance = 10_000_000_000_000 * SHANNON;
-    pub const MaxVotingBalance: Balance = Balance::MAX;
+    // Finite placeholder (see docs/porw-code-review-followups.md): Balance::MAX halts the chain.
+    pub const MaxVotingBalance: Balance = 10_000_000_000_000_000_000 * SHANNON;
 }
 
 impl pallet_subspace::Config for Runtime {
@@ -377,7 +378,7 @@ impl VariantCount for HoldIdentifierWrapper {
 
 parameter_types! {
     pub const VotingStakeMin: Balance = 10_000_000_000_000 * SHANNON;
-    pub const VotingStakeMax: Balance = Balance::MAX;
+    pub const VotingStakeMax: Balance = 10_000_000_000_000_000_000 * SHANNON;
     pub const VotingStakeHoldReason: HoldIdentifierWrapper =
         HoldIdentifierWrapper(HoldIdentifier::VotingStake);
 }

@@ -1192,7 +1192,10 @@ fn vote_equivocation_current_voters_duplicate() {
 
         // Equivocating voter doesn't get reward, but the other voter does
         assert_eq!(Subspace::find_voting_reward_addresses().len(), 1);
-        assert_eq!(Subspace::find_voting_reward_addresses().first().unwrap().0, other_reward_address);
+        assert_eq!(
+            Subspace::find_voting_reward_addresses().first().unwrap().0,
+            other_reward_address
+        );
     });
 }
 
@@ -1546,5 +1549,41 @@ fn set_pot_slot_iterations_works() {
             ),
             Err(DispatchError::Module(_))
         );
+    });
+}
+
+#[test]
+fn voter_weight_floors_and_never_excludes() {
+    new_test_ext(allow_all_pot_extension()).execute_with(|| {
+        // mock: MaxVotingBalance = 50 -> max_weight = floor(sqrt(50)) = 7,
+        // floor = 7 * 5000 / 10000 = 3.
+        let max_weight = Subspace::max_voting_stake_weight();
+        assert_eq!(max_weight, 7);
+        let floor = max_weight * super::MIN_VOTER_WEIGHT_BPS / 10_000;
+        assert_eq!(floor, 3);
+
+        // A capacity farmer with no stake keeps a non-zero baseline weight
+        // (the fix for the exclusion cliff): floor, never 0.
+        assert_eq!(Subspace::voter_weight(0, max_weight), floor);
+        assert!(Subspace::voter_weight(0, max_weight) > 0);
+
+        // A maximally-staked (or over-cap) voter gets the full base weight.
+        assert_eq!(Subspace::voter_weight(50, max_weight), max_weight);
+        assert_eq!(Subspace::voter_weight(u128::MAX, max_weight), max_weight);
+
+        // Monotonic and bounded in [floor, max_weight].
+        let mut prev = 0;
+        for stake in [0u128, 5, 10, 20, 50, 1000] {
+            let w = Subspace::voter_weight(stake, max_weight);
+            assert!(w >= floor && w <= max_weight, "stake {stake} -> {w}");
+            assert!(w >= prev, "not monotonic at {stake}");
+            prev = w;
+        }
+
+        // Degenerate max_weight == 0 stays 0 (no divide-by-zero).
+        assert_eq!(Subspace::voter_weight(50, 0), 0);
+
+        // With no stake anywhere, weighting is a no-op: full weight for all.
+        assert_eq!(Subspace::voting_stake_weight(&1), max_weight);
     });
 }
