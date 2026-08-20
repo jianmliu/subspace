@@ -1,0 +1,18 @@
+=== host ===
+placid-wicked-love
+Thu Aug 20 15:17:23 UTC 2026
+name, memory.total [MiB], clocks.max.memory [MHz]
+NVIDIA A100 80GB PCIe, 81920 MiB, 1512 MHz
+
+=== correctness (native GPU backend) ===
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+11 passed, 1 warning in 2.49s
+
+=== benchmark ===
+/home/ubuntu/miniconda3/envs/voicechat/lib/python3.12/site-packages/torch/cuda/__init__.py:65: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+E=8 N=1024 K=2048 M=4 topk=2 (0.03 GB): base 0.230ms  fused 0.248ms  overhead 8.03%  sweep 370 GB/s
+E=8 N=1024 K=2048 M=64 topk=2 (0.03 GB): base 0.253ms  fused 0.271ms  overhead 7.42%  sweep 377 GB/s
+E=64 N=512 K=2048 M=64 topk=8 (0.13 GB): base 0.571ms  fused 0.586ms  overhead 2.71%  sweep 848 GB/s
+E=64 N=4096 K=2048 M=16 topk=8 (1.07 GB): base 1.110ms  fused 1.206ms  overhead 8.65%  sweep 1401 GB/s
