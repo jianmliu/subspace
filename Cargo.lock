@@ -7990,6 +7990,7 @@ dependencies = [
  "pallet-block-fees",
  "pallet-subspace",
  "pallet-timestamp",
+ "pallet-voting-stake",
  "parity-scale-codec",
  "prop-test",
  "scale-info",
@@ -8265,6 +8266,7 @@ dependencies = [
  "futures",
  "log",
  "pallet-balances",
+ "pallet-voting-stake",
  "parity-scale-codec",
  "rand 0.8.5",
  "scale-info",
@@ -8423,6 +8425,20 @@ dependencies = [
  "sp-core",
  "sp-io",
  "sp-runtime",
+]
+
+[[package]]
+name = "pallet-voting-stake"
+version = "0.1.0"
+dependencies = [
+ "frame-support",
+ "frame-system",
+ "pallet-balances",
+ "parity-scale-codec",
+ "scale-info",
+ "sp-io",
+ "sp-runtime",
+ "subspace-runtime-primitives",
 ]
 
 [[package]]
@@ -12479,6 +12495,7 @@ name = "sp-consensus-subspace"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "integer-sqrt",
  "log",
  "parity-scale-codec",
  "scale-info",
@@ -13980,6 +13997,7 @@ dependencies = [
  "pallet-transaction-payment-rpc-runtime-api",
  "pallet-transporter",
  "pallet-utility",
+ "pallet-voting-stake",
  "parity-scale-codec",
  "scale-info",
  "sp-api",
@@ -14201,6 +14219,7 @@ dependencies = [
  "pallet-transaction-payment-rpc-runtime-api",
  "pallet-transporter",
  "pallet-utility",
+ "pallet-voting-stake",
  "parity-scale-codec",
  "scale-info",
  "sp-api",

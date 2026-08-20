@@ -21,7 +21,8 @@ pub use pallet::*;
 use serde::{Deserialize, Serialize};
 use sp_core::U256;
 use sp_runtime::Saturating;
-use sp_runtime::traits::{CheckedSub, Zero};
+use sp_runtime::traits::{CheckedSub, One, Zero};
+use sp_runtime::Vec;
 use subspace_runtime_primitives::{BlockNumber, FindBlockRewardAddress, FindVotingRewardAddresses};
 pub use weights::WeightInfo;
 
@@ -99,7 +100,7 @@ mod pallet {
         type FindBlockRewardAddress: FindBlockRewardAddress<Self::AccountId>;
 
         /// Reward addresses of all receivers of voting rewards
-        type FindVotingRewardAddresses: FindVotingRewardAddresses<Self::AccountId>;
+        type FindVotingRewardAddresses: FindVotingRewardAddresses<Self::AccountId, BalanceOf<Self>>;
 
         type WeightInfo: WeightInfo;
 
@@ -279,34 +280,73 @@ impl<T: Config> Pallet<T> {
             // Issue reward later once all voters were taxed
         }
 
-        let voters = T::FindVotingRewardAddresses::find_voting_reward_addresses();
-        if !voters.is_empty() {
-            let vote_reward = Self::vote_reward(&VoterSubsidyPoints::<T>::get(), block_number);
-            // Tax voter
-            let proposer_tax = vote_reward / T::ProposerTaxOnVotes::get().1.into()
-                * T::ProposerTaxOnVotes::get().0.into();
-            // Subtract tax from vote reward
-            let vote_reward = vote_reward - proposer_tax;
+            let voters = T::FindVotingRewardAddresses::find_voting_reward_addresses();
+            if !voters.is_empty() {
+                let vote_reward = Self::vote_reward(&VoterSubsidyPoints::<T>::get(), block_number);
+                // Tax voter
+                let proposer_tax = vote_reward / T::ProposerTaxOnVotes::get().1.into()
+                    * T::ProposerTaxOnVotes::get().0.into();
+                // Subtract tax from vote reward
+                let vote_reward = vote_reward - proposer_tax;
 
-            for voter in voters {
-                // Can't exceed remaining issuance
-                let mut reward = vote_reward.min(new_remaining_issuance);
-                new_remaining_issuance -= reward;
-                // Can't exceed remaining issuance
-                let proposer_reward = proposer_tax.min(new_remaining_issuance);
-                new_remaining_issuance -= proposer_reward;
-                // In case block author equivocated, give full reward to voter
-                if maybe_block_author.is_some() {
-                    block_reward += proposer_reward;
+                let voter_count: BalanceOf<T> = BalanceOf::<T>::from(voters.len() as u32);
+                let voter_reward_pool = vote_reward.saturating_mul(voter_count);
+                let proposer_tax_total = proposer_tax.saturating_mul(voter_count);
+
+                let any_nonzero = voters.iter().any(|(_, weight)| !weight.is_zero());
+                let weighted_voters: Vec<_> = if any_nonzero {
+                    voters
+                        .into_iter()
+                        .filter(|(_voter, weight)| !weight.is_zero())
+                        .collect()
                 } else {
-                    reward += proposer_reward;
+                    // All weights are zero: fall back to equal share across voters.
+                    voters
+                        .into_iter()
+                        .map(|(voter, _)| (voter, BalanceOf::<T>::one()))
+                        .collect()
+                };
+
+            let total_weight = weighted_voters.iter().fold(
+                BalanceOf::<T>::zero(),
+                |acc, (_voter, weight)| acc + *weight,
+            );
+
+            if !total_weight.is_zero() && (!voter_reward_pool.is_zero() || !proposer_tax_total.is_zero()) {
+                let available_voter_pool = voter_reward_pool.min(new_remaining_issuance);
+                new_remaining_issuance -= available_voter_pool;
+
+                let proposer_tax_available = proposer_tax_total.min(new_remaining_issuance);
+                new_remaining_issuance -= proposer_tax_available;
+
+                let total_voter_pool = if maybe_block_author.is_some() {
+                    available_voter_pool
+                } else {
+                    available_voter_pool.saturating_add(proposer_tax_available)
+                };
+
+                let mut distributed = BalanceOf::<T>::zero();
+                let weighted_voters_len = weighted_voters.len();
+                for (index, (voter, weight)) in weighted_voters.into_iter().enumerate() {
+                    let is_last = index + 1 == weighted_voters_len;
+                    let mut reward = total_voter_pool.saturating_mul(weight) / total_weight;
+                    if is_last {
+                        reward = reward.saturating_add(
+                            total_voter_pool.saturating_sub(distributed.saturating_add(reward)),
+                        );
+                    }
+                    distributed = distributed.saturating_add(reward);
+
+                    if !reward.is_zero() {
+                        let _imbalance = T::Currency::deposit_creating(&voter, reward);
+                        T::OnReward::on_reward(voter.clone(), reward);
+
+                        Self::deposit_event(Event::VoteReward { voter, reward });
+                    }
                 }
 
-                if !reward.is_zero() {
-                    let _imbalance = T::Currency::deposit_creating(&voter, reward);
-                    T::OnReward::on_reward(voter.clone(), reward);
-
-                    Self::deposit_event(Event::VoteReward { voter, reward });
+                if maybe_block_author.is_some() && !proposer_tax_available.is_zero() {
+                    block_reward = block_reward.saturating_add(proposer_tax_available);
                 }
             }
         }

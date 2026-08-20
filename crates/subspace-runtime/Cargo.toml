@@ -33,6 +33,7 @@ pallet-mmr.workspace = true
 pallet-multisig.workspace = true
 pallet-preimage.workspace = true
 pallet-rewards.workspace = true
+pallet-voting-stake.workspace = true
 pallet-runtime-configs.workspace = true
 pallet-scheduler.workspace = true
 pallet-subspace = { workspace = true, features = ["serde"] }
@@ -96,6 +97,7 @@ std = [
     "pallet-multisig/std",
     "pallet-preimage/std",
     "pallet-rewards/std",
+    "pallet-voting-stake/std",
     "pallet-runtime-configs/std",
     "pallet-scheduler/std",
     "pallet-subspace/std",

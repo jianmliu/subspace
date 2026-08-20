@@ -167,6 +167,14 @@ sp_api::impl_runtime_apis! {
             unreachable!()
         }
 
+        fn voting_stake_weight(_reward_address: PublicKey) -> u128 {
+            unreachable!()
+        }
+
+        fn max_voting_stake_weight() -> u128 {
+            unreachable!()
+        }
+
         fn block_weight() -> Weight {
             unreachable!()
         }

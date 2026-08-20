@@ -69,6 +69,7 @@ frame_support::construct_runtime!(
     pub struct Test {
         System: frame_system,
         Balances: pallet_balances,
+        VotingStake: pallet_voting_stake,
         Subspace: pallet_subspace,
     }
 );
@@ -125,6 +126,10 @@ parameter_types! {
     pub const ReportLongevity: u64 = 34;
     pub const ShouldAdjustSolutionRange: bool = false;
     pub const BlockSlotCount: u32 = 6;
+    pub const MinVotingBalance: Balance = 5;
+    pub const MaxVotingBalance: Balance = 50;
+    pub const VotingStakeMin: Balance = 0;
+    pub const VotingStakeMax: Balance = Balance::MAX;
 }
 
 impl Config for Test {
@@ -148,6 +153,19 @@ impl Config for Test {
     type WeightInfo = ();
     type BlockSlotCount = BlockSlotCount;
     type ExtensionWeightInfo = crate::extensions::weights::SubstrateWeight<Test>;
+    type VotingRewardCurrency = Balances;
+    type MinVotingBalance = MinVotingBalance;
+    type MaxVotingBalance = MaxVotingBalance;
+    type VotingStakeProvider = VotingStake;
+}
+
+impl pallet_voting_stake::Config for Test {
+    type RuntimeEvent = RuntimeEvent;
+    type Balance = Balance;
+    type Currency = Balances;
+    type HoldReason = ();
+    type MinStake = VotingStakeMin;
+    type MaxStake = VotingStakeMax;
 }
 
 pub fn go_to_block(

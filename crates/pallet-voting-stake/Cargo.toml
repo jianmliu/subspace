@@ -1,0 +1,29 @@
+[package]
+name = "pallet-voting-stake"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+parity-scale-codec = { workspace = true, default-features = false, features = ["derive"] }
+scale-info = { workspace = true, default-features = false, features = ["derive"] }
+frame-support = { workspace = true, default-features = false }
+frame-system = { workspace = true, default-features = false }
+sp-runtime = { workspace = true, default-features = false }
+subspace-runtime-primitives = { workspace = true, default-features = false }
+
+[dev-dependencies]
+sp-io = { workspace = true, default-features = false }
+sp-runtime = { workspace = true, default-features = false }
+pallet-balances = { workspace = true, default-features = false }
+
+[features]
+default = ["std"]
+std = [
+    "parity-scale-codec/std",
+    "scale-info/std",
+    "frame-support/std",
+    "frame-system/std",
+    "sp-io/std",
+    "sp-runtime/std",
+    "subspace-runtime-primitives/std",
+]

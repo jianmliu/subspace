@@ -1,5 +1,7 @@
 use frame_support::derive_impl;
 use frame_support::traits::{ConstU32, ConstU128};
+use sp_runtime::BuildStorage;
+use std::cell::RefCell;
 use sp_runtime::traits::parameter_types;
 use subspace_runtime_primitives::{
     ConsensusEventSegmentSize, FindBlockRewardAddress, FindVotingRewardAddresses, RewardsEnabled,
@@ -7,6 +9,7 @@ use subspace_runtime_primitives::{
 
 type Block = frame_system::mocking::MockBlock<Test>;
 type Balance = u128;
+type AccountId = u64;
 
 frame_support::construct_runtime!(
     pub struct Test {
@@ -54,9 +57,9 @@ impl<RewardAddress> FindBlockRewardAddress<RewardAddress> for MockFindBlockRewar
 
 pub struct MockFindVotingRewardAddresses;
 
-impl<RewardAddress> FindVotingRewardAddresses<RewardAddress> for MockFindVotingRewardAddresses {
-    fn find_voting_reward_addresses() -> Vec<RewardAddress> {
-        Vec::new()
+impl FindVotingRewardAddresses<AccountId, Balance> for MockFindVotingRewardAddresses {
+    fn find_voting_reward_addresses() -> Vec<(AccountId, Balance)> {
+        MOCK_VOTERS.with(|v| v.borrow().clone())
     }
 }
 
@@ -72,4 +75,19 @@ impl crate::Config for Test {
     type FindVotingRewardAddresses = MockFindVotingRewardAddresses;
     type WeightInfo = ();
     type OnReward = ();
+}
+
+thread_local! {
+    pub static MOCK_VOTERS: RefCell<Vec<(AccountId, Balance)>> = RefCell::new(Vec::new());
+}
+
+pub fn new_test_ext() -> sp_io::TestExternalities {
+    let mut storage = frame_system::GenesisConfig::<Test>::default()
+        .build_storage()
+        .unwrap();
+    pallet_balances::GenesisConfig::<Test>::default()
+        .assimilate_storage(&mut storage)
+        .unwrap();
+
+    storage.into()
 }

@@ -40,7 +40,7 @@ use sp_consensus_subspace::digests::{
     CompatibleDigestItem, PreDigest, PreDigestPotInfo, extract_pre_digest,
 };
 use sp_consensus_subspace::{
-    PotNextSlotInput, SignedVote, SubspaceApi, SubspaceJustification, Vote,
+    PotNextSlotInput, SignedVote, SubspaceApi, SubspaceJustification, Vote, scale_solution_range,
 };
 use sp_core::H256;
 use sp_runtime::traits::{Block as BlockT, Header, NumberFor, One, Saturating, Zero};
@@ -386,6 +386,7 @@ where
             extract_solution_ranges_for_block(self.client.as_ref(), parent_hash).ok()?;
 
         let maybe_root_plot_public_key = runtime_api.root_plot_public_key(parent_hash).ok()?;
+        let max_voting_weight = runtime_api.max_voting_stake_weight(parent_hash).ok()?;
 
         let parent_pot_parameters = runtime_api.pot_parameters(parent_hash).ok()?;
         let parent_future_slot = if parent_header.number().is_zero() {
@@ -535,6 +536,15 @@ where
                     continue;
                 }
             };
+
+            let voter_weight = runtime_api
+                .voting_stake_weight(parent_hash, solution.reward_address)
+                .ok()?;
+            let scaled_solution_range =
+                scale_solution_range(solution_range, voter_weight, max_voting_weight);
+            let scaled_voting_solution_range =
+                scale_solution_range(voting_solution_range, voter_weight, max_voting_weight);
+
             let sector_expiration_check_segment_index = match solution
                 .history_size
                 .sector_expiration_check(chain_constants.min_sector_lifetime())
@@ -554,7 +564,7 @@ where
                 slot.into(),
                 &VerifySolutionParams {
                     proof_of_time,
-                    solution_range: voting_solution_range,
+                    solution_range: scaled_voting_solution_range,
                     piece_check_params: Some(PieceCheckParams {
                         max_pieces_in_sector,
                         segment_commitment,
@@ -572,7 +582,7 @@ where
                 Ok(solution_distance) => {
                     // If solution is of high enough quality and block pre-digest wasn't produced yet,
                     // block reward is claimed
-                    if solution_distance <= solution_range / 2 {
+                    if solution_distance <= scaled_solution_range / 2 {
                         if maybe_pre_digest.is_none() {
                             info!(%slot, "🚜 Claimed block at slot");
                             maybe_pre_digest.replace(PreDigest::V0 {

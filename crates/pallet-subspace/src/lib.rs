@@ -23,7 +23,7 @@ use alloc::string::String;
 use core::num::NonZeroU64;
 use frame_support::dispatch::DispatchResult;
 use frame_support::pallet_prelude::{EnsureOrigin, RuntimeDebug};
-use frame_support::traits::Get;
+use frame_support::traits::{Currency, Get};
 use frame_system::offchain::SubmitTransaction;
 use frame_system::pallet_prelude::*;
 use log::{debug, error, warn};
@@ -35,11 +35,15 @@ use sp_consensus_slots::Slot;
 use sp_consensus_subspace::consensus::{is_proof_of_time_valid, verify_solution};
 use sp_consensus_subspace::digests::CompatibleDigestItem;
 use sp_consensus_subspace::{
-    PotParameters, PotParametersChange, SignedVote, Vote, WrappedPotOutput,
+    PotParameters, PotParametersChange, SignedVote, Vote, WrappedPotOutput, scale_solution_range,
+    stake_to_weight,
 };
 use sp_runtime::Weight;
+
+type BalanceOf<T> =
+    <<T as Config>::VotingRewardCurrency as Currency<<T as frame_system::Config>::AccountId>>::Balance;
 use sp_runtime::generic::DigestItem;
-use sp_runtime::traits::{BlockNumberProvider, CheckedSub, Hash, One, Zero};
+use sp_runtime::traits::{BlockNumberProvider, CheckedSub, Hash, One, SaturatedConversion, Zero};
 use sp_runtime::transaction_validity::{
     InvalidTransaction, TransactionPriority, TransactionSource, TransactionValidity,
     TransactionValidityError, ValidTransaction,
@@ -55,7 +59,7 @@ use subspace_core_primitives::solutions::{RewardSignature, SolutionRange};
 use subspace_core_primitives::{
     BlockHash, PublicKey, REWARD_SIGNING_CONTEXT, ScalarBytes, SlotNumber,
 };
-use subspace_runtime_primitives::CreateUnsigned;
+use subspace_runtime_primitives::{CreateUnsigned, VotingStakeProvider};
 use subspace_verification::{
     PieceCheckParams, VerifySolutionParams, check_reward_signature, derive_next_solution_range,
     derive_pot_entropy,
@@ -114,10 +118,11 @@ struct VoteVerificationData {
 
 #[frame_support::pallet]
 pub mod pallet {
-    use super::{EraChangeTrigger, ExtensionWeightInfo, VoteVerificationData};
+    use super::{BalanceOf, EraChangeTrigger, ExtensionWeightInfo, VoteVerificationData};
     use crate::RawOrigin;
     use crate::weights::WeightInfo;
     use frame_support::pallet_prelude::*;
+    use frame_support::traits::{Currency, Get};
     use frame_system::pallet_prelude::*;
     use sp_consensus_slots::Slot;
     use sp_consensus_subspace::SignedVote;
@@ -135,6 +140,7 @@ pub mod pallet {
     use subspace_core_primitives::segments::{HistorySize, SegmentHeader, SegmentIndex};
     use subspace_core_primitives::solutions::{RewardSignature, SolutionRange};
     use subspace_core_primitives::{PublicKey, Randomness, ScalarBytes};
+    use subspace_runtime_primitives::VotingStakeProvider;
 
     pub(super) struct InitialSolutionRanges<T: Config> {
         _config: T,
@@ -197,6 +203,20 @@ pub mod pallet {
         /// Delay after block, in slots, when entropy injection takes effect.
         #[pallet::constant]
         type PotEntropyInjectionDelay: Get<Slot>;
+
+        /// Currency used to determine weight of voting rewards.
+        type VotingRewardCurrency: Currency<Self::AccountId>;
+
+        /// Minimum balance required for a voting reward weight to be counted.
+        #[pallet::constant]
+        type MinVotingBalance: Get<BalanceOf<Self>>;
+
+        /// Maximum balance to consider per voter when deriving voting weight.
+        #[pallet::constant]
+        type MaxVotingBalance: Get<BalanceOf<Self>>;
+
+        /// Provider of dedicated voting stake used for weighting rewards.
+        type VotingStakeProvider: VotingStakeProvider<Self::AccountId, BalanceOf<Self>>;
 
         /// The amount of time, in blocks, that each era should last.
         /// NOTE: Currently it is not possible to change the era duration after
@@ -487,7 +507,7 @@ pub mod pallet {
         _,
         BTreeMap<
             (PublicKey, SectorIndex, PieceOffset, ScalarBytes, Slot),
-            (Option<T::AccountId>, RewardSignature),
+            (Option<T::AccountId>, RewardSignature, BalanceOf<T>),
         >,
         ValueQuery,
     >;
@@ -498,7 +518,7 @@ pub mod pallet {
         _,
         BTreeMap<
             (PublicKey, SectorIndex, PieceOffset, ScalarBytes, Slot),
-            (Option<T::AccountId>, RewardSignature),
+            (Option<T::AccountId>, RewardSignature, BalanceOf<T>),
         >,
     >;
 
@@ -865,7 +885,7 @@ impl<T: Config> Pallet<T> {
         }
         CurrentBlockVoters::<T>::put(BTreeMap::<
             (PublicKey, SectorIndex, PieceOffset, ScalarBytes, Slot),
-            (Option<T::AccountId>, RewardSignature),
+            (Option<T::AccountId>, RewardSignature, BalanceOf<T>),
         >::default());
 
         // If solution range was updated in previous block, set it as current.
@@ -1298,6 +1318,35 @@ impl<T: Config> Pallet<T> {
             Err(error) => Err(error.into()),
         }
     }
+
+    pub fn max_voting_stake_weight() -> u128 {
+        let max_balance = T::MaxVotingBalance::get().saturated_into::<u128>();
+        stake_to_weight(max_balance)
+    }
+
+    pub fn voting_stake_weight(account_id: &T::AccountId) -> u128 {
+        let max_weight = Self::max_voting_stake_weight();
+        if max_weight == 0 {
+            return 0;
+        }
+
+        if T::VotingStakeProvider::total_voting_stake().is_zero() {
+            return max_weight;
+        }
+
+        let stake = T::VotingStakeProvider::voting_stake(account_id);
+        let min_balance = T::MinVotingBalance::get();
+        let max_balance = T::MaxVotingBalance::get();
+        let effective_stake = if stake < min_balance {
+            BalanceOf::<T>::zero()
+        } else if stake > max_balance {
+            max_balance
+        } else {
+            stake
+        };
+
+        stake_to_weight(effective_stake.saturated_into::<u128>())
+    }
 }
 
 /// Verification data retrieval depends on whether it is called from pre_dispatch (meaning block
@@ -1477,6 +1526,16 @@ fn check_vote<T: Config>(
         parent_vote_verification_data
     };
 
+    let max_weight = Pallet::<T>::max_voting_stake_weight();
+    let voter_weight = Pallet::<T>::voting_stake_weight(&solution.reward_address);
+    let scaled_solution_range =
+        scale_solution_range(vote_verification_data.solution_range, voter_weight, max_weight);
+    let scaled_vote_solution_range = scale_solution_range(
+        vote_verification_data.vote_solution_range,
+        voter_weight,
+        max_weight,
+    );
+
     let sector_id = SectorId::new(
         solution.public_key.hash(),
         solution.sector_index,
@@ -1520,7 +1579,7 @@ fn check_vote<T: Config>(
         slot.into(),
         (&VerifySolutionParams {
             proof_of_time: *proof_of_time,
-            solution_range: vote_verification_data.vote_solution_range,
+            solution_range: scaled_vote_solution_range,
             piece_check_params: Some(PieceCheckParams {
                 max_pieces_in_sector: T::MaxPiecesInSector::get(),
                 segment_commitment,
@@ -1534,7 +1593,7 @@ fn check_vote<T: Config>(
             .into(),
     ) {
         Ok(solution_distance) => {
-            if solution_distance <= vote_verification_data.solution_range / 2 {
+            if solution_distance <= scaled_solution_range / 2 {
                 debug!("Vote quality is too high");
                 return Err(CheckVoteError::QualityTooHigh);
             }
@@ -1599,7 +1658,7 @@ fn check_vote<T: Config>(
             == Some(&key);
 
     if !is_equivocating
-        && let Some((_reward_address, signature)) = ParentBlockVoters::<T>::get().get(&key)
+        && let Some((_reward_address, signature, _weight)) = ParentBlockVoters::<T>::get().get(&key)
     {
         if signature != &signed_vote.signature {
             is_equivocating = true;
@@ -1610,7 +1669,7 @@ fn check_vote<T: Config>(
     }
 
     if !is_equivocating
-        && let Some((_reward_address, signature)) =
+        && let Some((_reward_address, signature, _weight)) =
             CurrentBlockVoters::<T>::get().unwrap_or_default().get(&key)
     {
         if signature != &signed_vote.signature {
@@ -1624,19 +1683,31 @@ fn check_vote<T: Config>(
     if pre_dispatch {
         // During `pre_dispatch` call put farmer into the list of reward receivers.
         CurrentBlockVoters::<T>::mutate(|current_reward_receivers| {
+            let reward_address = if is_equivocating {
+                None
+            } else {
+                Some(solution.reward_address.clone())
+            };
+            let stake = reward_address.as_ref().map_or_else(
+                BalanceOf::<T>::zero,
+                |reward_address| T::VotingStakeProvider::voting_stake(reward_address),
+            );
+            let min_balance = T::MinVotingBalance::get();
+            let max_balance = T::MaxVotingBalance::get();
+            let weight = if stake < min_balance {
+                BalanceOf::<T>::zero()
+            } else if stake > max_balance {
+                max_balance
+            } else {
+                stake
+            };
+
             current_reward_receivers
                 .as_mut()
                 .expect("Always set during block initialization")
                 .insert(
                     key,
-                    (
-                        if is_equivocating {
-                            None
-                        } else {
-                            Some(solution.reward_address.clone())
-                        },
-                        signed_vote.signature,
-                    ),
+                    (reward_address, signed_vote.signature, weight),
                 );
         });
     }
@@ -1658,7 +1729,7 @@ fn check_vote<T: Config>(
             if let Some(current_reward_receivers) = current_reward_receivers {
                 for (
                     (public_key, _sector_index, _piece_offset, _chunk, _slot),
-                    (reward_address, _signature),
+                    (reward_address, _signature, _weight),
                 ) in current_reward_receivers.iter_mut()
                 {
                     if public_key == &offender {
@@ -1750,8 +1821,11 @@ impl<T: Config> subspace_runtime_primitives::FindBlockRewardAddress<T::AccountId
     }
 }
 
-impl<T: Config> subspace_runtime_primitives::FindVotingRewardAddresses<T::AccountId> for Pallet<T> {
-    fn find_voting_reward_addresses() -> Vec<T::AccountId> {
+impl<T: Config>
+    subspace_runtime_primitives::FindVotingRewardAddresses<T::AccountId, BalanceOf<T>>
+    for Pallet<T>
+{
+    fn find_voting_reward_addresses() -> Vec<(T::AccountId, BalanceOf<T>)> {
         // Rewards might be disabled, in which case no voting reward
         if let Some(height) = EnableRewards::<T>::get()
             && frame_system::Pallet::<T>::current_block_number() >= height
@@ -1761,7 +1835,9 @@ impl<T: Config> subspace_runtime_primitives::FindVotingRewardAddresses<T::Accoun
             return CurrentBlockVoters::<T>::get()
                 .unwrap_or_else(ParentBlockVoters::<T>::get)
                 .into_values()
-                .filter_map(|(reward_address, _signature)| reward_address)
+                .filter_map(|(reward_address, _signature, weight)| {
+                    reward_address.map(|reward_address| (reward_address, weight))
+                })
                 .collect();
         }
 

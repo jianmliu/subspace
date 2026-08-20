@@ -1134,7 +1134,7 @@ fn vote_equivocation_current_voters_duplicate() {
                     signed_vote.vote.solution().chunk,
                     slot,
                 ),
-                (Some(reward_address), signed_vote.signature),
+                (Some(reward_address), signed_vote.signature, 0),
             );
             map
         });
@@ -1163,7 +1163,7 @@ fn vote_equivocation_current_voters_duplicate() {
                         other_signed_vote.vote.solution().chunk,
                         slot,
                     ),
-                    (Some(other_reward_address), other_signed_vote.signature),
+                    (Some(other_reward_address), other_signed_vote.signature, 0),
                 );
             });
         }
@@ -1183,7 +1183,7 @@ fn vote_equivocation_current_voters_duplicate() {
                     signed_vote.vote.solution().chunk,
                     slot,
                 ),
-                (Some(reward_address), RewardSignature::from([0; 64])),
+                (Some(reward_address), RewardSignature::from([0; 64]), 0),
             );
         });
 
@@ -1192,10 +1192,7 @@ fn vote_equivocation_current_voters_duplicate() {
 
         // Equivocating voter doesn't get reward, but the other voter does
         assert_eq!(Subspace::find_voting_reward_addresses().len(), 1);
-        assert_eq!(
-            Subspace::find_voting_reward_addresses().first().unwrap(),
-            &other_reward_address
-        );
+        assert_eq!(Subspace::find_voting_reward_addresses().first().unwrap().0, other_reward_address);
     });
 }
 
@@ -1245,7 +1242,7 @@ fn vote_equivocation_parent_voters_duplicate() {
                     signed_vote.vote.solution().chunk,
                     slot,
                 ),
-                (Some(reward_address), signed_vote.signature),
+                (Some(reward_address), signed_vote.signature, 0),
             );
             map
         });
@@ -1266,7 +1263,7 @@ fn vote_equivocation_parent_voters_duplicate() {
                     signed_vote.vote.solution().chunk,
                     slot,
                 ),
-                (Some(reward_address), RewardSignature::from([0; 64])),
+                (Some(reward_address), RewardSignature::from([0; 64]), 0),
             );
             map
         });
@@ -1308,7 +1305,7 @@ fn enabling_block_rewards_works() {
                     ScalarBytes::default(),
                     Subspace::current_slot(),
                 ),
-                (Some(2), RewardSignature::from([0; 64])),
+                (Some(2), RewardSignature::from([0; 64]), 0),
             );
             map
         });
@@ -1322,7 +1319,13 @@ fn enabling_block_rewards_works() {
 
         // Rewards are enabled by default
         assert_matches!(Subspace::find_block_reward_address(), Some(1));
-        assert_eq!(Subspace::find_voting_reward_addresses(), vec![2]);
+        assert_eq!(
+            Subspace::find_voting_reward_addresses()
+                .into_iter()
+                .map(|(account, _)| account)
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
 
         // Disable rewards
         crate::EnableRewards::<Test>::take();
@@ -1348,7 +1351,13 @@ fn enabling_block_rewards_works() {
         set_block_rewards();
         // Rewards kick in
         assert_matches!(Subspace::find_block_reward_address(), Some(1));
-        assert_eq!(Subspace::find_voting_reward_addresses(), vec![2]);
+        assert_eq!(
+            Subspace::find_voting_reward_addresses()
+                .into_iter()
+                .map(|(account, _)| account)
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
     });
 }
 
