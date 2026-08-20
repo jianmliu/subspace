@@ -44,6 +44,7 @@ subspace-archiving.workspace = true
 subspace-core-primitives.workspace = true
 subspace-erasure-coding.workspace = true
 subspace-kzg.workspace = true
+subspace-proof-of-residency.workspace = true
 subspace-proof-of-space.workspace = true
 subspace-verification.workspace = true
 thiserror.workspace = true

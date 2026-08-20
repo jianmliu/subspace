@@ -657,8 +657,14 @@ stake 缩放层原样套用。
   链下验证器；`pallet-porw-registry` 最小实现（native 验证证书链）。
 
 ### P3 — 共识集成
-- Solution 结构改造、出块路径接通、副本交叉核验与罚没、模型治理流程；
-  testnet。
+- ★ 已落地：`PorwApi` runtime API（sp-consensus-subspace 声明、
+  subspace-runtime 实现——注册快速路径 + 票数计算）；两 pallet 挂入
+  subspace-runtime（`PorwRegistry` = index 10，`PorwBond` hold reason，
+  wasm 构建通过）；`sc-consensus-subspace::porw` 客户端验证胶水
+  （票据展开 → 与 PoT 挑战的双向距离 → 质押缩放 solution range，
+  与 farming 路径同语义）。
+- 余下：slot_worker/block_import 出块路径接通（PreDigest 承载 PorwSolution、
+  奖励签名）、副本交叉核验调度、模型治理流程；testnet。
 
 ### 8.3 降级路径（设计保险）
 - **无 CC 的消费卡**：不参与 PoRW 主抽签，可参与 P0 式 DRAM/显存审计放大的

@@ -9,11 +9,11 @@ pub mod digests;
 pub mod inherents;
 
 use alloc::borrow::Cow;
-use integer_sqrt::IntegerSquareRoot;
 #[cfg(not(feature = "std"))]
 use alloc::string::String;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+use integer_sqrt::IntegerSquareRoot;
 use parity_scale_codec::{Decode, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 use sp_consensus_slots::{Slot, SlotDuration};
@@ -103,9 +103,7 @@ pub fn scale_solution_range(
     }
 
     let scaled = (u128::from(base_range) * weight) / max_weight;
-    scaled
-        .try_into()
-        .unwrap_or(SolutionRange::MAX)
+    scaled.try_into().unwrap_or(SolutionRange::MAX)
 }
 
 /// Next slot input for proof of time evaluation
@@ -597,6 +595,21 @@ impl PotParameters {
 }
 
 sp_api::decl_runtime_apis! {
+    /// API for Proof-of-Resident-Weights (PoRW) block authorship.
+    ///
+    /// Kept separate from [`SubspaceApi`] so runtimes without the PoRW
+    /// registry pallet need not implement it.
+    pub trait PorwApi {
+        /// Fast-path validation of a PoRW solution against the on-chain
+        /// registry (device, activation delay, measurement, model
+        /// announcement, hardware envelope). Returns the solution's lottery
+        /// ticket count on success, `None` on rejection. Stake scaling
+        /// composes on top via [`scale_solution_range`].
+        fn porw_solution_tickets(
+            solution: subspace_proof_of_residency::PorwSolution,
+        ) -> Option<u64>;
+    }
+
     /// API necessary for block authorship with Subspace.
     #[api_version(3)]
     pub trait SubspaceApi<RewardAddress: Encode + Decode> {

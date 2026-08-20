@@ -398,6 +398,31 @@ impl pallet_voting_stake::Config for Runtime {
 }
 
 parameter_types! {
+    /// Fidelity bond per PoRW device: sized to the fraud opportunity
+    /// (a bounded multiple of epoch revenue), never to capacity.
+    pub const PorwBondAmount: Balance = 1000 * AI3;
+    /// Blocks between device registration and lottery eligibility
+    /// (the instant-rental deterrent). Placeholder pending parameterization.
+    pub const PorwActivationDelay: BlockNumber = 100;
+    pub const PorwBondHoldReason: HoldIdentifierWrapper =
+        HoldIdentifierWrapper(HoldIdentifier::PorwBond);
+}
+
+/// One lottery ticket per this many bytes of audited traffic.
+const PORW_TICKET_UNIT: u64 = 1 << 30;
+
+impl pallet_porw_registry::Config for Runtime {
+    type RuntimeEvent = RuntimeEvent;
+    type Balance = Balance;
+    type Currency = Balances;
+    type HoldReason = PorwBondHoldReason;
+    // TESTNET-ONLY stub; replaced by NVIDIA CC / TDX / SNP verification (P4).
+    type Attestation = pallet_porw_registry::InsecureEvidenceAsMeasurement;
+    type BondAmount = PorwBondAmount;
+    type ActivationDelay = PorwActivationDelay;
+}
+
+parameter_types! {
     pub CreditSupply: Balance = Balances::total_issuance();
     pub TotalSpacePledged: u128 = {
         let pieces = solution_range_to_pieces(Subspace::solution_ranges().current, SLOT_PROBABILITY);
@@ -1119,6 +1144,7 @@ construct_runtime!(
         TransactionPayment: pallet_transaction_payment = 7,
         Utility: pallet_utility = 8,
         VotingStake: pallet_voting_stake = 9,
+        PorwRegistry: pallet_porw_registry = 10,
 
         Domains: pallet_domains = 12,
         RuntimeConfigs: pallet_runtime_configs = 14,
@@ -1423,6 +1449,19 @@ impl_runtime_apis! {
     impl sp_objects::ObjectsApi<Block> for Runtime {
         fn extract_block_object_mapping(block: Block) -> BlockObjectMapping {
             extract_block_object_mapping(block)
+        }
+    }
+
+    impl sp_consensus_subspace::PorwApi<Block> for Runtime {
+        fn porw_solution_tickets(
+            solution: subspace_proof_of_residency::PorwSolution,
+        ) -> Option<u64> {
+            PorwRegistry::check_solution(&solution).ok()?;
+            Some(subspace_proof_of_residency::ticket_count(
+                solution.coverage_bytes,
+                solution.m_t_millis,
+                PORW_TICKET_UNIT,
+            ))
         }
     }
 

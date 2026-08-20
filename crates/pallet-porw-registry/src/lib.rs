@@ -48,6 +48,17 @@ pub trait AttestationVerifier {
     fn verify(device_id: &Id32, evidence: &[u8]) -> Option<Id32>;
 }
 
+/// TESTNET-ONLY attestation stub: treats 32-byte evidence as the claimed
+/// measurement digest itself, verifying nothing. Real deployments implement
+/// [`AttestationVerifier`] over NVIDIA CC / TDX / SNP evidence (P4).
+pub struct InsecureEvidenceAsMeasurement;
+
+impl AttestationVerifier for InsecureEvidenceAsMeasurement {
+    fn verify(_device_id: &Id32, evidence: &[u8]) -> Option<Id32> {
+        evidence.try_into().ok()
+    }
+}
+
 /// Registered model metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, MaxEncodedLen, TypeInfo)]
 pub struct ModelInfo {

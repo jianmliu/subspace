@@ -342,6 +342,7 @@ pub enum HoldIdentifier {
     MessengerChannel,
     Preimage,
     VotingStake,
+    PorwBond,
 }
 
 /// Interface for creating an unsigned general extrinsic

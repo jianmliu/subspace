@@ -33,6 +33,7 @@ pallet-mmr.workspace = true
 pallet-multisig.workspace = true
 pallet-preimage.workspace = true
 pallet-rewards.workspace = true
+pallet-porw-registry.workspace = true
 pallet-voting-stake.workspace = true
 pallet-runtime-configs.workspace = true
 pallet-scheduler.workspace = true
@@ -68,6 +69,7 @@ sp-transaction-pool.workspace = true
 sp-version.workspace = true
 static_assertions.workspace = true
 subspace-core-primitives.workspace = true
+subspace-proof-of-residency.workspace = true
 subspace-runtime-primitives.workspace = true
 
 [build-dependencies]
@@ -97,6 +99,7 @@ std = [
     "pallet-multisig/std",
     "pallet-preimage/std",
     "pallet-rewards/std",
+    "pallet-porw-registry/std",
     "pallet-voting-stake/std",
     "pallet-runtime-configs/std",
     "pallet-scheduler/std",
@@ -133,6 +136,7 @@ std = [
     "sp-subspace-mmr/std",
     "sp-version/std",
     "subspace-core-primitives/std",
+    "subspace-proof-of-residency/std",
     "subspace-runtime-primitives/std",
     "substrate-wasm-builder",
 ]

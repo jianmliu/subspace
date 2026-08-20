@@ -14,6 +14,7 @@ pub mod archiver;
 pub mod aux_schema;
 pub mod block_import;
 pub mod notification;
+pub mod porw;
 pub mod slot_worker;
 #[cfg(test)]
 mod tests;

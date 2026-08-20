@@ -32,6 +32,7 @@ sp-std.workspace = true
 sp-timestamp.workspace = true
 sp-weights.workspace = true
 subspace-core-primitives.workspace = true
+subspace-proof-of-residency.workspace = true
 subspace-kzg = { workspace = true, optional = true }
 subspace-proof-of-space.workspace = true
 subspace-verification.workspace = true
@@ -58,6 +59,7 @@ std = [
     "sp-timestamp/std",
     "sp-weights/std",
     "subspace-core-primitives/std",
+    "subspace-proof-of-residency/std",
     "subspace-kzg/std",
     "subspace-proof-of-space/std",
     "subspace-verification/kzg",
