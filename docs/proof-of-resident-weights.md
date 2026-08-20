@@ -621,13 +621,22 @@ stake 缩放层原样套用。
 | `shared/subspace-proof-of-space-gpu` (CUDA/ROCm) | 作为 GPU kernel 工程的起点参考 |
 | `Solution` 结构 (`subspace-core-primitives`) | 改造：`{device_id, model_id, sketch, chunk_index, sig}` 替代 KZG witness 字段 |
 
-新增组件：
+新增组件（★ = 已在本分支落地）：
 
-1. `pallet-porw-registry`：设备/模型/度量注册表 + bond + 罚没 + 欺诈证明。
-2. `porw-agent`：CVM 内节点程序（Rust，度量白名单化、可复现构建）。
-3. `porw-sketch-gpu`：融合进推理引擎（vLLM/SGLang kernel epilogue）的
-   sketch 累加器 + 覆盖位图采集（无独立 sweep kernel——单一模式）。
-4. attestation 验证库（NVIDIA NRAS / TDX / SNP 报告解析与证书链验证）。
+1. ★ `crates/subspace-proof-of-residency`：PoRW 共识原语——sketch 规范的
+   规范 Rust 实现（与 Python/Triton 跨语言测试向量逐位一致）、tile Merkle
+   承诺（`R_W` 与 `partials_root`）、票数展开、包络检查、
+   `verify_tile_fraud_proof`。no_std，9 项测试。
+2. ★ `crates/pallet-porw-registry`：设备/模型/度量注册表 + fidelity bond
+   （fungible holds）+ 单 tile 欺诈证明罚没（赏金归举报人）+
+   `check_solution` 快速路径（注册/生效延迟/度量吊销/模型声明/包络）。
+   attestation 经可插拔 `AttestationVerifier` trait（P4 接真实 NVIDIA
+   CC/TDX/SNP 验证）。wasm 可编译，7 项 mock runtime 测试。
+3. `porw-agent`：CVM 内节点程序（Rust，度量白名单化、可复现构建）。
+4. `porw-sketch-gpu`：S1-over-coverage 定向 sweep（PoC 已有 Triton 版）
+   + 可选融合加固模式。
+5. attestation 验证库（NVIDIA NRAS / TDX / SNP 报告解析与证书链验证），
+   实现 `pallet-porw-registry::AttestationVerifier`。
 
 ## 8. 分期路线图
 

@@ -8177,6 +8177,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "pallet-porw-registry"
+version = "0.1.0"
+dependencies = [
+ "frame-support",
+ "frame-system",
+ "pallet-balances",
+ "parity-scale-codec",
+ "scale-info",
+ "sp-io",
+ "sp-runtime",
+ "subspace-proof-of-residency",
+]
+
+[[package]]
 name = "pallet-preimage"
 version = "39.1.0"
 source = "git+https://github.com/subspace/polkadot-sdk?rev=e831132867930ca90a7088c7246301ab29f015ba#e831132867930ca90a7088c7246301ab29f015ba"
@@ -13906,6 +13920,15 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "subspace-proof-of-residency"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "parity-scale-codec",
+ "scale-info",
 ]
 
 [[package]]

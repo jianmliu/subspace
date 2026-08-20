@@ -141,6 +141,7 @@ pallet-scheduler = { git = "https://github.com/subspace/polkadot-sdk", rev = "e8
 pallet-storage-overlay-checks = { version = "0.1.0", path = "domains/test/pallets/storage_overlay_checks", default-features = false }
 pallet-subspace = { version = "0.1.0", path = "crates/pallet-subspace", default-features = false }
 pallet-subspace-mmr = { version = "0.1.0", path = "crates/pallet-subspace-mmr", default-features = false }
+pallet-porw-registry = { version = "0.1.0", path = "crates/pallet-porw-registry", default-features = false }
 pallet-voting-stake = { version = "0.1.0", path = "crates/pallet-voting-stake", default-features = false }
 pallet-sudo = { git = "https://github.com/subspace/polkadot-sdk", rev = "e831132867930ca90a7088c7246301ab29f015ba", default-features = false }
 pallet-timestamp = { git = "https://github.com/subspace/polkadot-sdk", rev = "e831132867930ca90a7088c7246301ab29f015ba", default-features = false }
@@ -268,6 +269,7 @@ subspace-kzg = { version = "0.1.0", path = "shared/subspace-kzg", default-featur
 subspace-metrics = { version = "0.1.0", path = "shared/subspace-metrics" }
 subspace-networking = { version = "0.1.0", path = "crates/subspace-networking" }
 subspace-process = { version = "0.0.1", path = "shared/subspace-process" }
+subspace-proof-of-residency = { version = "0.1.0", path = "crates/subspace-proof-of-residency", default-features = false }
 subspace-proof-of-space = { version = "0.1.0", path = "crates/subspace-proof-of-space", default-features = false }
 subspace-proof-of-space-gpu = { version = "0.1.0", path = "shared/subspace-proof-of-space-gpu" }
 subspace-proof-of-time = { version = "0.1.0", path = "crates/subspace-proof-of-time" }

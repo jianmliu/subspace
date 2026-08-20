@@ -1,0 +1,422 @@
+//! PoRW registry pallet: attested devices, registered models, measurement
+//! whitelist, fidelity bond and tile-granular fraud-proof slashing.
+//!
+//! Consensus weight in PoRW comes from residency (capacity), never from the
+//! bond — the bond exists only to deter the protocol's two trusted
+//! assertions (agent-reported service multiplier; sketch integrity under a
+//! compromised TEE). See `docs/proof-of-resident-weights.md` §6.4.
+//!
+//! Verification split:
+//! - [`Pallet::check_solution`] is the per-block fast path (registry,
+//!   activation delay, model announcement, hardware envelope);
+//! - [`Call::report_fraud`] is the slow path: anyone may submit a
+//!   [`TileFraudProof`] showing that a per-tile sketch value committed under
+//!   a solution's `partials_root` disagrees with the canonical weight bytes
+//!   committed under the model's `R_W` root. A confirmed fraud slashes the
+//!   device's bond to the reporter and revokes the device.
+
+#![cfg_attr(not(feature = "std"), no_std)]
+#![forbid(unsafe_code)]
+#![warn(rust_2018_idioms)]
+
+extern crate alloc;
+
+use frame_support::pallet_prelude::*;
+use frame_support::traits::fungible::{Inspect, InspectHold, MutateHold};
+use frame_support::traits::tokens::Precision;
+use frame_system::pallet_prelude::*;
+use sp_runtime::traits::AtLeast32BitUnsigned;
+use subspace_proof_of_residency::{
+    FraudVerdict, PorwSolution, TileFraudProof, check_envelope, verify_tile_fraud_proof,
+};
+
+pub use pallet::*;
+
+#[cfg(test)]
+mod mock;
+#[cfg(test)]
+mod tests;
+
+/// 32-byte identifier (device id, model root `R_W`, measurement digest).
+pub type Id32 = [u8; 32];
+
+/// Pluggable attestation verifier. Production wires NVIDIA CC + TDX/SNP
+/// evidence verification (native or optimistic); tests use a stub.
+pub trait AttestationVerifier {
+    /// Verify `evidence` for `device_id`; on success return the measured
+    /// agent-code digest (checked against the on-chain whitelist).
+    fn verify(device_id: &Id32, evidence: &[u8]) -> Option<Id32>;
+}
+
+/// Registered model metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, MaxEncodedLen, TypeInfo)]
+pub struct ModelInfo {
+    /// Total weight bytes (multiple of the canonical tile size).
+    pub size_bytes: u64,
+    /// Replicas below which the model relies on storage-track arbitration
+    /// only (service parameter, not a safety one).
+    pub min_replicas: u32,
+    /// Relative reward weight (demand-following in production; static here).
+    pub reward_weight: u32,
+}
+
+/// Registered device metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, MaxEncodedLen, TypeInfo)]
+pub struct DeviceInfo<AccountId, BlockNumber> {
+    /// Account that bonded and controls this device.
+    pub owner: AccountId,
+    /// Whitelisted agent-code measurement this device attested to.
+    pub measurement: Id32,
+    /// Registered hardware envelope: bytes the device can physically move
+    /// through HBM in one slot. Caps claimed work (bounded-inflation bound).
+    pub bandwidth_bytes_per_slot: u64,
+    /// Registration block; the device joins the lottery only after the
+    /// activation delay (the instant-rental deterrent).
+    pub registered_at: BlockNumber,
+}
+
+/// Why a solution failed the fast path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SolutionRejection {
+    UnknownDevice,
+    DeviceInactive,
+    MeasurementRevoked,
+    UnknownModel,
+    ModelNotAnnounced,
+    EnvelopeExceeded,
+}
+
+#[frame_support::pallet]
+pub mod pallet {
+    use super::*;
+
+    #[pallet::pallet]
+    pub struct Pallet<T>(_);
+
+    #[pallet::config]
+    pub trait Config: frame_system::Config {
+        type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
+
+        type Balance: Parameter + AtLeast32BitUnsigned + Default + Copy + MaxEncodedLen;
+
+        type Currency: Inspect<Self::AccountId, Balance = Self::Balance>
+            + InspectHold<Self::AccountId, Balance = Self::Balance>
+            + MutateHold<Self::AccountId, Balance = Self::Balance>;
+
+        /// Hold reason for the fidelity bond.
+        type HoldReason: Get<<Self::Currency as InspectHold<Self::AccountId>>::Reason>;
+
+        /// Attestation evidence verifier.
+        type Attestation: AttestationVerifier;
+
+        /// Fidelity bond per device. Sized to the fraud opportunity (a
+        /// bounded multiple of epoch revenue), never to capacity.
+        #[pallet::constant]
+        type BondAmount: Get<Self::Balance>;
+
+        /// Blocks between registration and lottery eligibility.
+        #[pallet::constant]
+        type ActivationDelay: Get<BlockNumberFor<Self>>;
+    }
+
+    /// Whitelisted agent-code measurements (governance-managed).
+    #[pallet::storage]
+    pub type Measurements<T: Config> = StorageMap<_, Twox64Concat, Id32, (), OptionQuery>;
+
+    /// Registered models by `R_W` root.
+    #[pallet::storage]
+    pub type Models<T: Config> = StorageMap<_, Twox64Concat, Id32, ModelInfo, OptionQuery>;
+
+    /// Registered devices.
+    #[pallet::storage]
+    pub type Devices<T: Config> =
+        StorageMap<_, Twox64Concat, Id32, DeviceInfo<T::AccountId, BlockNumberFor<T>>, OptionQuery>;
+
+    /// Which models a device has announced residency for.
+    #[pallet::storage]
+    pub type DeviceModels<T: Config> =
+        StorageDoubleMap<_, Twox64Concat, Id32, Twox64Concat, Id32, (), OptionQuery>;
+
+    /// Announced replica count per model (service-tier signal).
+    #[pallet::storage]
+    pub type ReplicaCount<T: Config> = StorageMap<_, Twox64Concat, Id32, u32, ValueQuery>;
+
+    #[pallet::event]
+    #[pallet::generate_deposit(pub(super) fn deposit_event)]
+    pub enum Event<T: Config> {
+        MeasurementRegistered {
+            measurement: Id32,
+        },
+        MeasurementRevoked {
+            measurement: Id32,
+        },
+        ModelRegistered {
+            model_id: Id32,
+        },
+        DeviceRegistered {
+            device_id: Id32,
+            owner: T::AccountId,
+        },
+        DeviceDeregistered {
+            device_id: Id32,
+        },
+        ModelAnnounced {
+            device_id: Id32,
+            model_id: Id32,
+        },
+        ModelWithdrawn {
+            device_id: Id32,
+            model_id: Id32,
+        },
+        FraudConfirmed {
+            device_id: Id32,
+            reporter: T::AccountId,
+            tile_idx: u64,
+        },
+    }
+
+    #[pallet::error]
+    pub enum Error<T> {
+        /// Attestation evidence did not verify.
+        AttestationInvalid,
+        /// Attested measurement is not whitelisted.
+        UnknownMeasurement,
+        /// Device id already registered.
+        DeviceExists,
+        /// Device id not registered.
+        UnknownDevice,
+        /// Caller does not own the device.
+        NotOwner,
+        /// Model not registered.
+        UnknownModel,
+        /// Model size is not a multiple of the tile size.
+        BadModelSize,
+        /// Bond could not be held.
+        BondFailed,
+        /// Bond could not be released.
+        ReleaseFailed,
+        /// Fraud proof is malformed (Merkle paths / lengths do not verify).
+        FraudProofInvalid,
+        /// Fraud proof verified but shows agreement — no fraud.
+        NotFraud,
+        /// Solution's claimed model is not announced by the device.
+        ModelNotAnnounced,
+    }
+
+    #[pallet::call]
+    impl<T: Config> Pallet<T> {
+        /// Whitelist an agent-code measurement. Governance only.
+        #[pallet::call_index(0)]
+        #[pallet::weight(Weight::zero())]
+        pub fn register_measurement(origin: OriginFor<T>, measurement: Id32) -> DispatchResult {
+            ensure_root(origin)?;
+            Measurements::<T>::insert(measurement, ());
+            Self::deposit_event(Event::MeasurementRegistered { measurement });
+            Ok(())
+        }
+
+        /// Revoke a measurement (e.g. a compromised agent build). Devices
+        /// attested to it fail the fast path immediately.
+        #[pallet::call_index(1)]
+        #[pallet::weight(Weight::zero())]
+        pub fn revoke_measurement(origin: OriginFor<T>, measurement: Id32) -> DispatchResult {
+            ensure_root(origin)?;
+            Measurements::<T>::remove(measurement);
+            Self::deposit_event(Event::MeasurementRevoked { measurement });
+            Ok(())
+        }
+
+        /// Register a model by its `R_W` tile-Merkle root. Governance in
+        /// this milestone; the stake-to-list admission market replaces this.
+        #[pallet::call_index(2)]
+        #[pallet::weight(Weight::zero())]
+        pub fn register_model(
+            origin: OriginFor<T>,
+            model_id: Id32,
+            size_bytes: u64,
+            min_replicas: u32,
+            reward_weight: u32,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            ensure!(
+                size_bytes > 0
+                    && size_bytes % (subspace_proof_of_residency::TILE_BYTES as u64) == 0,
+                Error::<T>::BadModelSize
+            );
+            Models::<T>::insert(
+                model_id,
+                ModelInfo {
+                    size_bytes,
+                    min_replicas,
+                    reward_weight,
+                },
+            );
+            Self::deposit_event(Event::ModelRegistered { model_id });
+            Ok(())
+        }
+
+        /// Register an attested device: verify evidence, check the measured
+        /// agent build against the whitelist, hold the fidelity bond.
+        #[pallet::call_index(3)]
+        #[pallet::weight(Weight::zero())]
+        pub fn register_device(
+            origin: OriginFor<T>,
+            device_id: Id32,
+            bandwidth_bytes_per_slot: u64,
+            evidence: alloc::vec::Vec<u8>,
+        ) -> DispatchResult {
+            let owner = ensure_signed(origin)?;
+            ensure!(
+                !Devices::<T>::contains_key(device_id),
+                Error::<T>::DeviceExists
+            );
+            let measurement = T::Attestation::verify(&device_id, &evidence)
+                .ok_or(Error::<T>::AttestationInvalid)?;
+            ensure!(
+                Measurements::<T>::contains_key(measurement),
+                Error::<T>::UnknownMeasurement
+            );
+            T::Currency::hold(&T::HoldReason::get(), &owner, T::BondAmount::get())
+                .map_err(|_| Error::<T>::BondFailed)?;
+            Devices::<T>::insert(
+                device_id,
+                DeviceInfo {
+                    owner: owner.clone(),
+                    measurement,
+                    bandwidth_bytes_per_slot,
+                    registered_at: frame_system::Pallet::<T>::block_number(),
+                },
+            );
+            Self::deposit_event(Event::DeviceRegistered { device_id, owner });
+            Ok(())
+        }
+
+        /// Deregister an owned device and release its bond.
+        #[pallet::call_index(4)]
+        #[pallet::weight(Weight::zero())]
+        pub fn deregister_device(origin: OriginFor<T>, device_id: Id32) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            let info = Devices::<T>::get(device_id).ok_or(Error::<T>::UnknownDevice)?;
+            ensure!(info.owner == who, Error::<T>::NotOwner);
+            T::Currency::release(
+                &T::HoldReason::get(),
+                &who,
+                T::BondAmount::get(),
+                Precision::Exact,
+            )
+            .map_err(|_| Error::<T>::ReleaseFailed)?;
+            Self::remove_device(&device_id);
+            Self::deposit_event(Event::DeviceDeregistered { device_id });
+            Ok(())
+        }
+
+        /// Announce that a device holds a registered model resident.
+        #[pallet::call_index(5)]
+        #[pallet::weight(Weight::zero())]
+        pub fn announce_model(
+            origin: OriginFor<T>,
+            device_id: Id32,
+            model_id: Id32,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            let info = Devices::<T>::get(device_id).ok_or(Error::<T>::UnknownDevice)?;
+            ensure!(info.owner == who, Error::<T>::NotOwner);
+            ensure!(
+                Models::<T>::contains_key(model_id),
+                Error::<T>::UnknownModel
+            );
+            if !DeviceModels::<T>::contains_key(device_id, model_id) {
+                DeviceModels::<T>::insert(device_id, model_id, ());
+                ReplicaCount::<T>::mutate(model_id, |c| *c = c.saturating_add(1));
+            }
+            Self::deposit_event(Event::ModelAnnounced {
+                device_id,
+                model_id,
+            });
+            Ok(())
+        }
+
+        /// Report a tile-granular fraud proof against a committed solution.
+        /// On confirmed fraud: the device's bond is transferred to the
+        /// reporter and the device is revoked.
+        #[pallet::call_index(6)]
+        #[pallet::weight(Weight::zero())]
+        pub fn report_fraud(
+            origin: OriginFor<T>,
+            solution: PorwSolution,
+            global_challenge: Id32,
+            proof: TileFraudProof,
+        ) -> DispatchResult {
+            let reporter = ensure_signed(origin)?;
+            let device = Devices::<T>::get(solution.device_id).ok_or(Error::<T>::UnknownDevice)?;
+            ensure!(
+                Models::<T>::contains_key(solution.model_id),
+                Error::<T>::UnknownModel
+            );
+            let tile_idx = proof.tile_idx;
+            match verify_tile_fraud_proof(&solution, &global_challenge, &solution.model_id, &proof)
+            {
+                FraudVerdict::Fraud => {
+                    // Slash: move the held bond to the reporter.
+                    let _ = T::Currency::transfer_on_hold(
+                        &T::HoldReason::get(),
+                        &device.owner,
+                        &reporter,
+                        T::BondAmount::get(),
+                        Precision::BestEffort,
+                        frame_support::traits::tokens::Restriction::Free,
+                        frame_support::traits::tokens::Fortitude::Force,
+                    );
+                    Self::remove_device(&solution.device_id);
+                    Self::deposit_event(Event::FraudConfirmed {
+                        device_id: solution.device_id,
+                        reporter,
+                        tile_idx,
+                    });
+                    Ok(())
+                }
+                FraudVerdict::NoFraud => Err(Error::<T>::NotFraud.into()),
+                FraudVerdict::Invalid => Err(Error::<T>::FraudProofInvalid.into()),
+            }
+        }
+    }
+
+    impl<T: Config> Pallet<T> {
+        /// Per-block fast-path validation of a PoRW solution (registry,
+        /// activation delay, measurement, model announcement, envelope).
+        /// Ticket-count / solution-range math composes on top of this in
+        /// the client (`sc-consensus-subspace` integration).
+        pub fn check_solution(solution: &PorwSolution) -> Result<(), SolutionRejection> {
+            let device =
+                Devices::<T>::get(solution.device_id).ok_or(SolutionRejection::UnknownDevice)?;
+            let now = frame_system::Pallet::<T>::block_number();
+            if now < device.registered_at + T::ActivationDelay::get() {
+                return Err(SolutionRejection::DeviceInactive);
+            }
+            if !Measurements::<T>::contains_key(device.measurement) {
+                return Err(SolutionRejection::MeasurementRevoked);
+            }
+            if !Models::<T>::contains_key(solution.model_id) {
+                return Err(SolutionRejection::UnknownModel);
+            }
+            if !DeviceModels::<T>::contains_key(solution.device_id, solution.model_id) {
+                return Err(SolutionRejection::ModelNotAnnounced);
+            }
+            if !check_envelope(
+                solution.coverage_bytes,
+                solution.m_t_millis,
+                device.bandwidth_bytes_per_slot,
+            ) {
+                return Err(SolutionRejection::EnvelopeExceeded);
+            }
+            Ok(())
+        }
+
+        fn remove_device(device_id: &Id32) {
+            for (model_id, ()) in DeviceModels::<T>::drain_prefix(device_id) {
+                ReplicaCount::<T>::mutate(model_id, |c| *c = c.saturating_sub(1));
+            }
+            Devices::<T>::remove(device_id);
+        }
+    }
+}
