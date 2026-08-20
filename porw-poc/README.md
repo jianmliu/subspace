@@ -31,8 +31,20 @@ python -m pytest tests/ -q              # TRITON_INTERPRET=1 自动启用
    字级 slot 新鲜系数方案下，同一攻击者及 64 泛函/最小二乘重构攻击者
    在所有测试 slot 全部失败。
 
-## 待 GPU 验证（bench_gpu.py）
+## 规范 v2（u32 优化版）
 
-- 融合开销目标 < 2%（decode 形状负载）；
-- 独立扫描应接近 HBM 带宽上限；
-- 生产化需把 int64+mask 换成原生 u32、fp32 dot 换回 fp16 tensor core 路径。
+- 字粒度 16-bit → **32-bit**（PRF 调用减半，安全粒度不变）；
+- kernel 全部**原生 u32** 环绕算术（不再 int64+掩码模拟）；
+  >int31 的常数经 int32 张量传入、kernel 内 bitcast，规避 Triton 字面量
+  提升为 int64 的跨端不一致；
+- **系数强制为奇数**（`c_j |= 1`）：模 2^32 下奇数乘子是双射，修复
+  偶系数时字高位翻转以 ≤50% 概率逃逸检测的规范级弱点（v2 测试新增覆盖）；
+- sweep kernel 支持覆盖子集（`tile_ids`）——S1-over-coverage 主路线的
+  执行原语；
+- 基准新增 1 GB 权重配置（压穿 A100 L2，真实 HBM 流式形态）。
+
+## 待 GPU 复测（bench_gpu.py，同一条 ssh 命令）
+
+- 1 GB 配置下的融合开销与 sweep GB/s（预期 sweep 显著高于 v1 的
+  947–1119 GB/s）；
+- 融合版剩余差距归因（fp32 dot 基线 vs fp16 tensor core 为后续项）。

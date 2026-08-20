@@ -1,35 +1,33 @@
-"""Triton kernels for the PoRW P1 feasibility PoC.
+"""Triton kernels for the PoRW P1 feasibility PoC — spec v2, native u32.
 
 Two kernels:
 
-- ``moe_gemm_sketch_kernel`` — a structural replica of vLLM's
-  ``fused_moe_kernel`` (vllm/model_executor/layers/fused_moe/fused_moe.py):
-  same grouped pid mapping, same ``sorted_token_ids``/``expert_ids`` routing,
-  same K-loop with the weight tile ``b`` loaded per iteration — plus the PoRW
-  sketch fused at the exact point where ``b`` sits in registers.
-  ``ENABLE_SKETCH`` is a constexpr so the no-sketch baseline compiles to the
-  plain GEMM for A/B benchmarking on real GPUs.
+- ``sketch_sweep_kernel`` — the standalone per-slot sweep, now the PRIMARY
+  strategy (S1-over-coverage per the A100 measurements): the agent derives
+  the coverage set from router telemetry and sweeps exactly those tiles.
+  Native u32 arithmetic throughout.
 
-- ``sketch_sweep_kernel`` — the standalone per-slot sweep (strategy S1),
-  used for dense/cuBLAS-handled layers where coverage is trivially full,
-  and as an independent cross-check of the fused path.
+- ``moe_gemm_sketch_kernel`` — structural replica of vLLM's
+  ``fused_moe_kernel`` with the sketch fused at the weight-tile load point
+  (hardening mode / S2).  The sketch reads the weight tile again through a
+  32-bit view of the same addresses — these loads hit L1/L2 (the fp16 tile
+  was just loaded), so no extra HBM traffic.
 
-Portability notes (correctness-first PoC):
+Portability notes:
 
-- All sketch arithmetic is int64 + explicit ``& 0xFFFFFFFF`` masking, so the
-  Triton CPU interpreter (``TRITON_INTERPRET=1``, numpy backend), a real GPU
-  backend, and the numpy reference in ``spec.py`` agree bit-exactly.
-  A production kernel would use native u32 ops (~2x fewer instructions).
-- The PoC fixes K == TILE_WORDS (2048), so one canonical 4 KiB tile == one
-  (expert, n) weight row and the per-row accumulator is flushed once after
-  the K loop.  General K needs a flush at every 2048-word boundary
-  (BLOCK_SIZE_K must divide TILE_WORDS) — mechanical, not fundamental.
+- All sketch arithmetic is native u32 (wrapping) — no int64 emulation.
+  Triton promotes >int31 literals to int64 (and the CPU interpreter's numpy
+  promotion differs again), so the fmix multipliers, GOLDEN32 and the slot
+  seed are passed in a small int32 tensor and bitcast to u32 in-kernel:
+  bit-exact on interpreter, GPU backend and the numpy reference.
+- The PoC fixes K*2 bytes == TILE_BYTES (K == 2048 fp16 elements == 1024
+  u32 words), so one canonical 4 KiB tile == one (expert, n) weight row.
+  General K needs a flush at tile boundaries — mechanical, not fundamental.
 
 Multi-load semantics: every token-block routed to expert ``e`` computes the
 same per-row sketch value, and the store is idempotent (same address, same
-value), so racing writes across token-blocks are benign and the result is
-independent of batch size and launch order — matching the protocol's
-"at least once per slot" semantics without atomics.
+value), so racing writes across token-blocks are benign — matching the
+protocol's "at least once per slot" semantics without atomics.
 """
 
 import os
@@ -43,37 +41,83 @@ if not torch.cuda.is_available():
 import triton
 import triton.language as tl
 
-M32 = 0xFFFFFFFF
-GOLDEN32 = 0x9E3779B9
+from .spec import FMIX_M1, FMIX_M2, GOLDEN32, TILE_WORDS
+
+
+def _wrap_i32(v: int) -> int:
+    """Encode a u32 constant as the int32 with the same bit pattern."""
+    v &= 0xFFFFFFFF
+    return v - (1 << 32) if v >= (1 << 31) else v
+
+
+def make_params(slot_seed: int, device) -> torch.Tensor:
+    """int32 tensor [M1, M2, GOLDEN, seed] (u32 bit patterns)."""
+    return torch.tensor(
+        [_wrap_i32(FMIX_M1), _wrap_i32(FMIX_M2), _wrap_i32(GOLDEN32),
+         _wrap_i32(slot_seed)],
+        dtype=torch.int32,
+        device=device,
+    )
 
 
 @triton.jit
-def _fmix32(h):
-    """murmur3 finalizer on int64 values, masked to u32 (result < 2^32)."""
-    h = h & 0xFFFFFFFF
-    h = (h ^ (h >> 16)) & 0xFFFFFFFF
-    h = (h * 0x85EBCA6B) & 0xFFFFFFFF
-    h = (h ^ (h >> 13)) & 0xFFFFFFFF
-    h = (h * 0xC2B2AE35) & 0xFFFFFFFF
-    h = (h ^ (h >> 16)) & 0xFFFFFFFF
+def _fmix32u(h, m1, m2):
+    """murmur3 finalizer, native u32 wrapping arithmetic."""
+    h = h ^ (h >> 16)
+    h = h * m1
+    h = h ^ (h >> 13)
+    h = h * m2
+    h = h ^ (h >> 16)
     return h
+
+
+@triton.jit
+def sketch_sweep_kernel(
+    buf_ptr,  # int32 view of the weight buffer (little-endian u32 words)
+    out_ptr,  # int32 (u32 bit patterns), one sketch per tile
+    tile_ids_ptr,  # int64: canonical tile index of each swept tile (coverage set)
+    params_ptr,  # int32[4]: fmix m1, m2, golden, slot_seed (u32 bit patterns)
+    n_tiles,
+    TILE_WORDS_C: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    pid = tl.program_id(axis=0).to(tl.int64)
+    if pid >= n_tiles:
+        return
+    m1 = tl.load(params_ptr + 0).to(tl.uint32, bitcast=True)
+    m2 = tl.load(params_ptr + 1).to(tl.uint32, bitcast=True)
+    golden = tl.load(params_ptr + 2).to(tl.uint32, bitcast=True)
+    seed = tl.load(params_ptr + 3).to(tl.uint32, bitcast=True)
+
+    tile_id = tl.load(tile_ids_ptr + pid)
+    r_tile = _fmix32u(_fmix32u(seed ^ tile_id.to(tl.uint32), m1, m2), m1, m2)
+
+    s = tl.zeros((BLOCK,), dtype=tl.uint32)
+    base = tile_id * TILE_WORDS_C
+    for start in range(0, TILE_WORDS_C, BLOCK):
+        offs = start + tl.arange(0, BLOCK)
+        w = tl.load(buf_ptr + base + offs).to(tl.uint32, bitcast=True)
+        c = _fmix32u(r_tile + offs.to(tl.uint32) * golden, m1, m2) | 1
+        s += c * w
+    tl.store(out_ptr + pid, tl.sum(s, axis=0).to(tl.int32, bitcast=True))
 
 
 @triton.jit
 def moe_gemm_sketch_kernel(
     a_ptr,
     b_ptr,
+    b32_ptr,  # int32 view of b: [E, N, K//2], contiguous
     c_ptr,
     sorted_token_ids_ptr,
     expert_ids_ptr,
     num_tokens_post_padded_ptr,
-    partials_ptr,
+    partials_ptr,  # int32 (u32 bit patterns), one per canonical tile
     coverage_ptr,
+    params_ptr,  # int32[4], as in sketch_sweep_kernel
     N,
     K,
     EM,
     num_valid_tokens,
-    slot_seed,
     stride_am,
     stride_ak,
     stride_be,
@@ -127,11 +171,22 @@ def moe_gemm_sketch_kernel(
 
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
-    # ---- PoRW additions: per-row (== per-tile, since K == TILE_WORDS)
-    # sketch accumulator and coefficients ----
-    sk = tl.zeros((BLOCK_SIZE_N,), dtype=tl.int64)
+    # ---- PoRW additions (native u32) ----
+    K2 = K // 2  # u32 words per (expert, n) row; row == canonical tile
+    m1 = tl.load(params_ptr + 0).to(tl.uint32, bitcast=True)
+    m2 = tl.load(params_ptr + 1).to(tl.uint32, bitcast=True)
+    golden = tl.load(params_ptr + 2).to(tl.uint32, bitcast=True)
+    seed = tl.load(params_ptr + 3).to(tl.uint32, bitcast=True)
     tile_idx = off_expert * N + offs_bn
-    r_tile = _fmix32(_fmix32(slot_seed ^ tile_idx))
+    r_tile = _fmix32u(_fmix32u(seed ^ tile_idx.to(tl.uint32), m1, m2), m1, m2)
+    sk = tl.zeros((BLOCK_SIZE_N,), dtype=tl.uint32)
+    offs_k2 = tl.arange(0, BLOCK_SIZE_K // 2).to(tl.int64)
+    b32_ptrs = (
+        b32_ptr
+        + off_expert * N * K2
+        + offs_k2[:, None]
+        + offs_bn[None, :] * K2
+    )
 
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
         k_rem = K - k * BLOCK_SIZE_K
@@ -141,26 +196,28 @@ def moe_gemm_sketch_kernel(
             other=0.0,
         )
         b = tl.load(b_ptrs, mask=offs_k[:, None] < k_rem, other=0.0)
-        # (PoC casts to fp32 for interpreter/GPU parity; the GPU benchmark
-        # build uses the native fp16 tensor-core path.)
+        # (PoC keeps fp32 dot for interpreter/GPU parity; the production
+        # kernel uses the native fp16 tensor-core path.)
         accumulator += tl.dot(a.to(tl.float32), b.to(tl.float32))
 
         if ENABLE_SKETCH:
-            # The weight tile is in registers right now: sketch it.
-            w = b.to(tl.uint16, bitcast=True).to(tl.int64)  # [K_blk, N_blk]
-            j = k * BLOCK_SIZE_K + offs_k  # word index within the row/tile
-            c = _fmix32(r_tile[None, :] + ((j[:, None] * 0x9E3779B9) & 0xFFFFFFFF))
-            sk += tl.sum((c * w) & 0xFFFFFFFF, axis=0)
+            # Second view of the just-loaded tile as u32 words (L1/L2 hit).
+            w = tl.load(b32_ptrs).to(tl.uint32, bitcast=True)  # [K2_blk, N_blk]
+            j = (k * (BLOCK_SIZE_K // 2) + offs_k2).to(tl.uint32)
+            c = _fmix32u(r_tile[None, :] + j[:, None] * golden, m1, m2) | 1
+            sk += tl.sum(c * w, axis=0)
+            b32_ptrs += BLOCK_SIZE_K // 2
 
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += BLOCK_SIZE_K * stride_bk
 
     if ENABLE_SKETCH:
-        # Idempotent per-tile store (same value from every token-block of
-        # this expert) + coverage flag.
+        # Idempotent per-tile store + coverage flag.
         out_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
         n_mask = out_n < N
-        tl.store(partials_ptr + tile_idx, sk & 0xFFFFFFFF, mask=n_mask)
+        tl.store(
+            partials_ptr + tile_idx, sk.to(tl.int32, bitcast=True), mask=n_mask
+        )
         tl.store(
             coverage_ptr + tile_idx,
             tl.full((BLOCK_SIZE_N,), 1, tl.int8),
@@ -173,31 +230,16 @@ def moe_gemm_sketch_kernel(
     tl.store(c_ptrs, c_out, mask=token_mask[:, None] & (offs_cn[None, :] < N))
 
 
-@triton.jit
-def sketch_sweep_kernel(
-    buf_ptr,  # int16 view of the weight buffer (little-endian words)
-    out_ptr,  # int64, one sketch per tile
-    n_tiles,
-    slot_seed,
-    TILE_WORDS: tl.constexpr,
-    BLOCK: tl.constexpr,
-):
-    pid = tl.program_id(axis=0).to(tl.int64)
-    if pid >= n_tiles:
-        return
-    r_tile = _fmix32(_fmix32(slot_seed ^ pid))
-    s = tl.zeros((BLOCK,), dtype=tl.int64)
-    for start in range(0, TILE_WORDS, BLOCK):
-        j = start + tl.arange(0, BLOCK).to(tl.int64)
-        w = tl.load(buf_ptr + pid * TILE_WORDS + j).to(tl.int64) & 0xFFFF
-        c = _fmix32(r_tile + ((j * 0x9E3779B9) & 0xFFFFFFFF))
-        s += (c * w) & 0xFFFFFFFF
-    tl.store(out_ptr + pid, tl.sum(s, axis=0) & 0xFFFFFFFF)
-
-
 # ---------------------------------------------------------------------------
 # Host wrappers
 # ---------------------------------------------------------------------------
+
+
+def _u32_np(t: torch.Tensor):
+    """int32 tensor (u32 bit patterns) -> numpy uint32 array."""
+    import numpy as np
+
+    return t.cpu().numpy().view(np.uint32)
 
 
 def run_moe_gemm(
@@ -212,12 +254,13 @@ def run_moe_gemm(
     block_k: int = 64,
     group_m: int = 1,
 ):
-    """Launch the fused kernel; returns (c [M*top_k, N], partials, coverage)."""
+    """Launch the fused kernel; returns (c [M*top_k, N], partials u32 np,
+    coverage np)."""
     from .reference import moe_align
 
     M, K = a.shape
     E, N, Kb = b.shape
-    assert K == Kb and b.is_contiguous()
+    assert K == Kb and b.is_contiguous() and K % 2 == 0 and block_k % 2 == 0
     top_k = topk_ids.shape[1]
     num_valid_tokens = M * top_k
 
@@ -231,25 +274,28 @@ def run_moe_gemm(
     EM = sorted_token_ids.numel()
 
     c = torch.zeros((num_valid_tokens, N), dtype=torch.float16, device=dev)
-    n_tiles = E * N  # K == TILE_WORDS: one tile per (expert, n) row
-    partials = torch.zeros(n_tiles, dtype=torch.int64, device=dev)
+    n_tiles = E * N  # 2*K bytes == TILE_BYTES: one tile per (expert, n) row
+    partials = torch.zeros(n_tiles, dtype=torch.int32, device=dev)
     coverage = torch.zeros(n_tiles, dtype=torch.int8, device=dev)
+    b32 = b.view(torch.int32)
+    params = make_params(slot_seed, dev)
 
     grid = (triton.cdiv(EM, block_m) * triton.cdiv(N, block_n),)
     moe_gemm_sketch_kernel[grid](
         a,
         b,
+        b32,
         c,
         sorted_token_ids,
         expert_ids_t,
         num_post_padded_t,
         partials,
         coverage,
+        params,
         N,
         K,
         EM,
         num_valid_tokens,
-        slot_seed,
         a.stride(0),
         a.stride(1),
         b.stride(0),
@@ -264,18 +310,28 @@ def run_moe_gemm(
         GROUP_SIZE_M=group_m,
         ENABLE_SKETCH=enable_sketch,
     )
-    return c, partials, coverage
+    return c, _u32_np(partials), coverage.cpu().numpy()
 
 
-def run_sketch_sweep(buf_bytes: torch.Tensor, slot_seed: int, block: int = 256):
-    """Standalone sweep over a uint8 buffer; returns per-tile sketches."""
-    from .spec import TILE_WORDS
-
-    assert buf_bytes.dtype == torch.uint8 and buf_bytes.numel() % (TILE_WORDS * 2) == 0
-    words = buf_bytes.view(torch.int16)
-    n_tiles = words.numel() // TILE_WORDS
-    out = torch.zeros(n_tiles, dtype=torch.int64, device=buf_bytes.device)
+def run_sketch_sweep(
+    buf_bytes: torch.Tensor,
+    slot_seed: int,
+    tile_ids: torch.Tensor | None = None,
+    block: int = 512,
+):
+    """Sweep over a uint8 buffer; returns per-swept-tile sketches (numpy
+    uint32, in tile_ids order).  ``tile_ids`` (int64) selects a coverage
+    subset; default = all tiles (S1-over-coverage with full coverage)."""
+    assert buf_bytes.dtype == torch.uint8 and buf_bytes.numel() % (TILE_WORDS * 4) == 0
+    words = buf_bytes.view(torch.int32)
+    total_tiles = words.numel() // TILE_WORDS
+    if tile_ids is None:
+        tile_ids = torch.arange(total_tiles, dtype=torch.int64, device=buf_bytes.device)
+    n_tiles = tile_ids.numel()
+    out = torch.zeros(n_tiles, dtype=torch.int32, device=buf_bytes.device)
+    params = make_params(slot_seed, buf_bytes.device)
     sketch_sweep_kernel[(n_tiles,)](
-        words, out, n_tiles, slot_seed, TILE_WORDS=TILE_WORDS, BLOCK=block
+        words, out, tile_ids, params, n_tiles,
+        TILE_WORDS_C=TILE_WORDS, BLOCK=block,
     )
-    return out
+    return _u32_np(out)
