@@ -238,7 +238,9 @@ slot t:  PoT ──► c_t
          │         对每 32B chunk 检查 is_within_solution_range(...)  // 复用现逻辑
          └─ 中签 ⇒ Solution {
                device_id, model_id, slot,
-               sketch_t, coverage_bitmap, m_t, chunk_index,
+               sketch_t, coverage_bitmap, partials_root, m_t, chunk_index,
+               //        ^ per-tile sketch 值的 Merkle 根（kernel 本就产出
+               //          per-tile partials）——使核验可按单 tile 抽查（§4.6）
                sig = Sign_sk(...)            // 节点密钥, attestation 背书
             } ──► 出块
 ```
@@ -263,15 +265,26 @@ slot t:  PoT ──► c_t
    不是无界伪造；
 5. chunk 落入 solution range（同现有 `subspace-verification` 逻辑）。
 
-深度路径（抽查 + 欺诈证明）：
+深度路径（抽查 + 欺诈证明）——分两级，均以 `partials_root`
+（per-tile sketch 值的 Merkle 根）为锚，欺诈证明因此是**单 tile 粒度**：
+取回一个 tile 的字节 → 重算 `s_tile` → 与 Merkle 路径上的承诺比对，
+O(4KiB) + 一条路径，而非重算整个模型：
 
-- Solution 携带覆盖位图后，**副本交叉核验不需要知道推理输入**：任意持有
-  同一模型的注册设备可对声明的 `C_t` 用 slot 系数重算 sketch
-  （sketch 只依赖系数、tile 字节与覆盖集，不依赖激活值），不一致 ⇒
-  欺诈证明 ⇒ 罚没 bond 并吊销 device_id。这比 v0.1（重算依赖对方工作负载，
-  实际不可行）更强。诚实多数假设仅需在「同模型副本集合」内成立；
-  副本不足时由**存储轨终审**兜底（§5.6 风险 2）：任何存储轨农民可从
-  DSN 重算 sketch 提交欺诈证明，最终裁决不依赖 VRAM 副本存在。
+- **快速抓骗 = VRAM 副本交叉核验**：每 epoch 随机指派持有同一模型的
+  其他注册设备，对声明的 `C_t` 抽查若干 tile（权重就在自己 HBM 里，
+  抽查近乎免费；全量重算也仅 ~24ms）。**不需要知道被核验者的推理输入**
+  （sketch 只依赖系数、tile 字节与覆盖集，不依赖激活值）。不一致 ⇒
+  欺诈证明 ⇒ 罚没 bond 并吊销 device_id，举报人分赏金。诚实多数假设
+  仅需在「同模型副本集合」内成立——热模型副本多，天然满足，
+  故绝大多数票权被本级覆盖。
+- **终审 = 存储轨仲裁**（§5.6 风险 2）：孤本模型、或交叉核验双方各执
+  一词时，DSN 碎片对 `R_W` 是规范字节。任何 PoAS 农民检索含争议 tile
+  的 piece（~MiB 级）重算并提交欺诈证明——最终裁决不依赖任何 VRAM
+  副本存在，也裁决核验者本身的作恶。挑战期长度按 DSN 检索延迟定参。
+
+**本栈的边界（诚实重申）**：以上抓的是「驻留与覆盖造假」。`m_t` 的
+包络内虚报密码学上不可抓（§4.3 硬边界），其防线仅为 TEE 度量 +
+包络封顶 + 统计异常检测。
 - `m_t` 本身不可被外部重算（它是对真实负载的计数），其防线是
   快速路径的包络封顶 + attestation 度量 + 统计异常检测
   （长期贴着包络顶且无对应推理收入的设备可被治理层调查）。
