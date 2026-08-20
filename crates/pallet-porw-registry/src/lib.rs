@@ -103,6 +103,7 @@ pub enum SolutionRejection {
     UnknownModel,
     ModelNotAnnounced,
     EnvelopeExceeded,
+    BadSignature,
 }
 
 #[frame_support::pallet]
@@ -475,6 +476,23 @@ pub mod pallet {
                 device.bandwidth_bytes_per_slot,
             ) {
                 return Err(SolutionRejection::EnvelopeExceeded);
+            }
+            Ok(())
+        }
+
+        /// Full block-authorship validation: [`Self::check_solution`] plus a
+        /// check that the solution is signed by the device's node key over
+        /// this slot's `global_challenge`. This is what block import runs, so
+        /// an unsigned or forged solution can never author a block.
+        pub fn check_solution_signed(
+            solution: &PorwSolution,
+            global_challenge: &Id32,
+        ) -> Result<(), SolutionRejection> {
+            Self::check_solution(solution)?;
+            let device =
+                Devices::<T>::get(solution.device_id).ok_or(SolutionRejection::UnknownDevice)?;
+            if !Self::verify_device_signature(&device.pubkey, solution, global_challenge) {
+                return Err(SolutionRejection::BadSignature);
             }
             Ok(())
         }

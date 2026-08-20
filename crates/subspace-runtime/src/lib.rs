@@ -1460,8 +1460,9 @@ impl_runtime_apis! {
     impl sp_consensus_subspace::PorwApi<Block> for Runtime {
         fn porw_solution_tickets(
             solution: subspace_proof_of_residency::PorwSolution,
+            global_challenge: [u8; 32],
         ) -> Option<u64> {
-            PorwRegistry::check_solution(&solution).ok()?;
+            PorwRegistry::check_solution_signed(&solution, &global_challenge).ok()?;
             Some(subspace_proof_of_residency::ticket_count(
                 solution.coverage_bytes,
                 solution.m_t_millis,

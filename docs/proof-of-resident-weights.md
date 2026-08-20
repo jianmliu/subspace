@@ -663,8 +663,13 @@ stake 缩放层原样套用。
   wasm 构建通过）；`sc-consensus-subspace::porw` 客户端验证胶水
   （票据展开 → 与 PoT 挑战的双向距离 → 质押缩放 solution range，
   与 farming 路径同语义）。
-- 余下：slot_worker/block_import 出块路径接通（PreDigest 承载 PorwSolution、
-  奖励签名）、副本交叉核验调度、模型治理流程；testnet。
+- ★ 已落地（P3 第一阶段）：PoRW 预摘要载体（`PorwPreDigest`，独立
+  `PORW` 引擎 ID，与 farming 预摘要共存）+ header 提取 + 导入侧验证入口
+  `verify_porw_block`（提取预摘要 → 从 PoT 导出 slot 挑战 → 全量校验）；
+  快速路径升级为 `check_solution_signed`（注册 + 包络 + **设备签名**），
+  故未签名/伪造的 solution 无法出块。
+- 余下：slot_worker 授权循环产出预摘要与区块封印、副本交叉核验调度、
+  模型治理流程；testnet。
 
 ### 8.3 降级路径（设计保险）
 - **无 CC 的消费卡**：不参与 PoRW 主抽签，可参与 P0 式 DRAM/显存审计放大的

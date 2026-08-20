@@ -45,6 +45,11 @@ use subspace_verification::VerifySolutionParams;
 /// The `ConsensusEngineId` of Subspace.
 const SUBSPACE_ENGINE_ID: ConsensusEngineId = *b"SUB_";
 
+/// The `ConsensusEngineId` of PoRW pre-digests. Distinct from
+/// [`SUBSPACE_ENGINE_ID`] so a PoRW block's pre-digest never collides with a
+/// farming pre-digest and the two authorship paths can coexist.
+const PORW_ENGINE_ID: ConsensusEngineId = *b"PORW";
+
 /// Subspace justification
 #[derive(Debug, Clone, Encode, Decode, TypeInfo)]
 pub enum SubspaceJustification {
@@ -600,13 +605,15 @@ sp_api::decl_runtime_apis! {
     /// Kept separate from [`SubspaceApi`] so runtimes without the PoRW
     /// registry pallet need not implement it.
     pub trait PorwApi {
-        /// Fast-path validation of a PoRW solution against the on-chain
-        /// registry (device, activation delay, measurement, model
-        /// announcement, hardware envelope). Returns the solution's lottery
-        /// ticket count on success, `None` on rejection. Stake scaling
-        /// composes on top via [`scale_solution_range`].
+        /// Full validation of a PoRW solution against the on-chain registry
+        /// (device, activation delay, measurement, model announcement,
+        /// hardware envelope) and the device signature over this slot's
+        /// `global_challenge`. Returns the solution's lottery ticket count on
+        /// success, `None` on rejection. Stake scaling composes on top via
+        /// [`scale_solution_range`].
         fn porw_solution_tickets(
             solution: subspace_proof_of_residency::PorwSolution,
+            global_challenge: [u8; 32],
         ) -> Option<u64>;
     }
 

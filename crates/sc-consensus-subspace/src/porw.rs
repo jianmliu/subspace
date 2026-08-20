@@ -9,15 +9,29 @@
 //! (composing [`scale_solution_range`], mirroring the farming path in
 //! [`crate::slot_worker`]).
 //!
-//! Wiring these checks into `slot_worker`/`block_import` block production
-//! (PreDigest carriage, reward signing) is the P3 milestone; the validation
-//! semantics live here so both sides share one implementation.
+//! P3 status: the pre-digest carriage ([`PorwPreDigest`] under its own engine
+//! id) and the import-side entry point ([`verify_porw_block`], which extracts
+//! the pre-digest, derives the slot challenge and runs full validation) are in
+//! place. Producing the pre-digest in the `slot_worker` authorship loop and
+//! sealing the block are the remaining P3 pieces; both sides share this
+//! validation and the digest carriage.
 
 use sp_api::ProvideRuntimeApi;
+use sp_consensus_slots::Slot;
+use sp_consensus_subspace::digests::{PorwPreDigest, extract_porw_pre_digest};
 use sp_consensus_subspace::{PorwApi, scale_solution_range};
-use sp_runtime::traits::Block as BlockT;
+use sp_runtime::traits::{Block as BlockT, Header as HeaderT};
+use subspace_core_primitives::pot::PotOutput;
 use subspace_core_primitives::solutions::SolutionRange;
 use subspace_proof_of_residency::{PorwSolution, derive_slot_seed, ticket_chunk};
+
+/// Derive a slot's 32-byte global challenge from its proof of time, matching
+/// the farming path (`PotOutput -> global randomness -> global challenge`).
+pub fn global_challenge_for_slot(proof_of_time: PotOutput, slot: Slot) -> [u8; 32] {
+    *proof_of_time
+        .derive_global_randomness()
+        .derive_global_challenge(slot.into())
+}
 
 /// Why a PoRW solution was rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +45,8 @@ pub enum PorwSolutionError {
     ChunkOutOfRange,
     /// The winning chunk's distance exceeds the (stake-scaled) target range.
     OutsideSolutionRange,
+    /// The block header has no (or a duplicate) PoRW pre-digest.
+    MissingPreDigest,
 }
 
 /// Bidirectional distance between the derived ticket chunk and the global
@@ -82,7 +98,7 @@ where
 {
     let tickets = client
         .runtime_api()
-        .porw_solution_tickets(parent_hash, solution.clone())
+        .porw_solution_tickets(parent_hash, solution.clone(), *global_challenge)
         .map_err(|_| PorwSolutionError::RuntimeApi)?
         .ok_or(PorwSolutionError::Rejected)?;
     if solution.chunk_index >= tickets {
@@ -97,6 +113,42 @@ where
     } else {
         Err(PorwSolutionError::OutsideSolutionRange)
     }
+}
+
+/// Block-import entry point for PoRW blocks: extract the PoRW pre-digest from
+/// a block header, derive the slot's global challenge from its proof of time,
+/// and run the full [`verify_porw_solution`] against the parent state.
+///
+/// This is the verification half of the P3 authorship path. Producing the
+/// pre-digest in `slot_worker` and sealing the block are the remaining P3
+/// pieces; both sides share this validation and the digest carriage.
+pub fn verify_porw_block<Block, Client, RewardAddress>(
+    client: &Client,
+    parent_hash: Block::Hash,
+    header: &Block::Header,
+    solution_range: SolutionRange,
+    voter_weight: u128,
+    max_voter_weight: u128,
+) -> Result<(PorwPreDigest<RewardAddress>, SolutionRange), PorwSolutionError>
+where
+    Block: BlockT,
+    Client: ProvideRuntimeApi<Block>,
+    Client::Api: PorwApi<Block>,
+    RewardAddress: parity_scale_codec::Decode,
+{
+    let pre_digest: PorwPreDigest<RewardAddress> =
+        extract_porw_pre_digest(header).map_err(|_| PorwSolutionError::MissingPreDigest)?;
+    let global_challenge = global_challenge_for_slot(pre_digest.proof_of_time(), pre_digest.slot());
+    let distance = verify_porw_solution(
+        client,
+        parent_hash,
+        pre_digest.solution(),
+        &global_challenge,
+        solution_range,
+        voter_weight,
+        max_voter_weight,
+    )?;
+    Ok((pre_digest, distance))
 }
 
 #[cfg(test)]

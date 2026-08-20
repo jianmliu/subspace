@@ -605,3 +605,171 @@ where
     }
     pre_digest.ok_or(Error::Missing(ErrorDigestType::PreDigest))
 }
+
+// ---------------------------------------------------------------------------
+// Proof-of-Resident-Weights (PoRW) pre-digest carriage
+// ---------------------------------------------------------------------------
+
+use crate::PORW_ENGINE_ID;
+use subspace_proof_of_residency::PorwSolution;
+
+/// A PoRW pre-runtime digest: everything needed to validate a PoRW block's
+/// authorship claim. Carried under [`PORW_ENGINE_ID`], separate from the
+/// farming [`PreDigest`] so the two paths coexist.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
+pub enum PorwPreDigest<RewardAddress> {
+    /// Initial version.
+    #[codec(index = 0)]
+    V0 {
+        /// Slot this block was authored for.
+        slot: Slot,
+        /// Reward address the block author will be paid at.
+        reward_address: RewardAddress,
+        /// The winning PoRW solution (device-signed).
+        solution: PorwSolution,
+        /// Proof of time for this slot.
+        proof_of_time: PotOutput,
+    },
+}
+
+impl<RewardAddress> PorwPreDigest<RewardAddress> {
+    /// Slot.
+    #[inline]
+    pub fn slot(&self) -> Slot {
+        let Self::V0 { slot, .. } = self;
+        *slot
+    }
+
+    /// The winning PoRW solution.
+    #[inline]
+    pub fn solution(&self) -> &PorwSolution {
+        let Self::V0 { solution, .. } = self;
+        solution
+    }
+
+    /// Reward address.
+    #[inline]
+    pub fn reward_address(&self) -> &RewardAddress {
+        let Self::V0 { reward_address, .. } = self;
+        reward_address
+    }
+
+    /// Proof of time for this slot.
+    #[inline]
+    pub fn proof_of_time(&self) -> PotOutput {
+        let Self::V0 { proof_of_time, .. } = self;
+        *proof_of_time
+    }
+}
+
+/// A digest item usable with PoRW consensus.
+pub trait CompatiblePorwDigestItem: Sized {
+    /// Construct a digest item carrying a PoRW pre-digest.
+    fn porw_pre_digest<RewardAddress: Encode>(pre_digest: &PorwPreDigest<RewardAddress>) -> Self;
+
+    /// If this item is a PoRW pre-digest, return it.
+    fn as_porw_pre_digest<RewardAddress: Decode>(&self) -> Option<PorwPreDigest<RewardAddress>>;
+}
+
+impl CompatiblePorwDigestItem for DigestItem {
+    fn porw_pre_digest<RewardAddress: Encode>(pre_digest: &PorwPreDigest<RewardAddress>) -> Self {
+        Self::PreRuntime(PORW_ENGINE_ID, pre_digest.encode())
+    }
+
+    fn as_porw_pre_digest<RewardAddress: Decode>(&self) -> Option<PorwPreDigest<RewardAddress>> {
+        self.pre_runtime_try_to(&PORW_ENGINE_ID)
+    }
+}
+
+/// Extract the single PoRW pre-digest from a header, erroring on a missing or
+/// duplicate one (mirrors [`extract_pre_digest`] for the farming path).
+pub fn extract_porw_pre_digest<Header, RewardAddress>(
+    header: &Header,
+) -> Result<PorwPreDigest<RewardAddress>, Error>
+where
+    Header: HeaderT,
+    RewardAddress: Decode,
+{
+    let mut pre_digest = None;
+    for log in header.digest().logs() {
+        match (
+            log.as_porw_pre_digest::<RewardAddress>(),
+            pre_digest.is_some(),
+        ) {
+            (Some(_), true) => return Err(Error::Duplicate(ErrorDigestType::PreDigest)),
+            (None, _) => {}
+            (s, false) => pre_digest = s,
+        }
+    }
+    pre_digest.ok_or(Error::Missing(ErrorDigestType::PreDigest))
+}
+
+#[cfg(test)]
+mod porw_tests {
+    use super::*;
+
+    fn sample_solution() -> PorwSolution {
+        PorwSolution {
+            device_id: [3; 32],
+            model_id: [5; 32],
+            sketch: 42,
+            partials_root: [7; 32],
+            coverage_bytes: 1 << 30,
+            m_t_millis: 1500,
+            chunk_index: 4,
+            signature: [9; 64],
+        }
+    }
+
+    #[test]
+    fn porw_pre_digest_round_trips_through_a_digest_item() {
+        let pre_digest = PorwPreDigest::V0 {
+            slot: Slot::from(1234),
+            reward_address: 77u64,
+            solution: sample_solution(),
+            proof_of_time: PotOutput::default(),
+        };
+        let item = DigestItem::porw_pre_digest(&pre_digest);
+        let decoded: PorwPreDigest<u64> = item
+            .as_porw_pre_digest()
+            .expect("item is a PoRW pre-digest");
+        assert_eq!(decoded, pre_digest);
+        // A farming pre-digest is not mistaken for a PoRW one and vice versa.
+        assert!(item.as_subspace_pre_digest::<u64>().is_none());
+    }
+
+    #[test]
+    fn extract_requires_exactly_one() {
+        use sp_runtime::testing::Header as TestHeader;
+        use sp_runtime::traits::Header as _;
+
+        let pre_digest = PorwPreDigest::V0 {
+            slot: Slot::from(1),
+            reward_address: 1u64,
+            solution: sample_solution(),
+            proof_of_time: PotOutput::default(),
+        };
+        // Missing.
+        let mut header = TestHeader::new_from_number(0);
+        assert!(matches!(
+            extract_porw_pre_digest::<_, u64>(&header),
+            Err(Error::Missing(_))
+        ));
+        // Exactly one.
+        header
+            .digest_mut()
+            .push(DigestItem::porw_pre_digest(&pre_digest));
+        assert_eq!(
+            extract_porw_pre_digest::<_, u64>(&header).unwrap(),
+            pre_digest
+        );
+        // Duplicate.
+        header
+            .digest_mut()
+            .push(DigestItem::porw_pre_digest(&pre_digest));
+        assert!(matches!(
+            extract_porw_pre_digest::<_, u64>(&header),
+            Err(Error::Duplicate(_))
+        ));
+    }
+}
