@@ -479,6 +479,35 @@ SSD 上（显存太贵、存不下历史的问题消解）；chiapos/KZG/plottin
 bond 罚没使得已注册算力作恶有直接经济损失；与 Subspace 一样，PoT 保证无法
 通过快算未来挑战做 long-range 攻击。
 
+### 6.4 保真押金（bond）vs 质押权重（stake）：PoRW 需要前者、不需要后者
+
+一个原则性澄清，避免把 PoRW 误做成 PoS：
+
+**Subspace 无需 stake，因为它不含任何可信断言**——存储自证，要么审计读得出、
+要么读不出，没有可撒谎处，也就无物可罚没。**PoRW 用 TEE 换掉密码学唯一性，
+引入了两处可信断言**，故需要一笔押金去威慑撒谎，但仅此而已：
+
+1. 服务量乘数 `m_t`（§4.4）由被度量的 agent 自报，硬件包络只封上限、
+   包络内仍可虚报；
+2. TEE 被攻破时的 sketch 伪造（§6.2）需要一个可罚没对象。
+
+因此 **bond 恰好、且仅仅出现在 PoRW 依赖信任的位置**。三条必须守住的边界：
+
+| | fidelity bond（PoRW 需要） | consensus stake（PoRW 拒绝） |
+|---|---|---|
+| 抽签权重来源 | ∝ 驻留字节 × 服务量（容量本位） | ∝ stake ⇒ 退化为 PoS，VRAM 证明失去意义 |
+| 押金定价基准 | ∝ 作弊机会（≈ 一 epoch 收益的有界倍数） | ∝ 声明容量 ⇒ 资本门槛，摧毁「插上闲卡即挖」 |
+| 防即时租卡 | 由注册生效延迟承担（顶替 plotting 慢） | — |
+
+- **long-range / nothing-at-stake** 由继承的 PoT 硬时钟接住，与 Subspace 一样，
+  无需 stake 补足。
+- **domain operator 层的 staking 与本设计正交**：Subspace 的 decoupled
+  execution 中 operator 本就质押（执行层），PoRW 只改共识层（出块权），
+  二者分离、可直接叠加。
+- **实现复用**：PoS 分支的 staking pallet（锁定/解锁/罚没记账）可作为
+  fidelity bond 与乐观验证保证金（§3.2）的实现底座——**复用管道，不复用
+  「票数 ∝ stake」的语义**。
+
 ## 7. 与现有代码的映射
 
 | 现有组件 | PoRW 中的命运 |
