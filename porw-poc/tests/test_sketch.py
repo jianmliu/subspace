@@ -7,6 +7,16 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import torch as _torch
+
+# Triton kernels require CUDA; on CPU-only machines these tests must skip, not crash.
+pytestmark = pytest.mark.skipif(not _torch.cuda.is_available(), reason="Triton kernels need CUDA")
+_DEV = "cuda" if _torch.cuda.is_available() else "cpu"
+
+def _t(x):
+    """numpy -> torch on the kernel device (tests previously passed CPU tensors to Triton)."""
+    return _torch.from_numpy(x).to(_DEV)
+
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -135,7 +145,7 @@ def test_sweep_kernel_matches_reference():
     b = random_weights()
     buf = weight_bytes(b)
     for seed in SLOT_SEEDS[:2]:
-        got = run_sketch_sweep(torch.from_numpy(buf.copy()), seed)
+        got = run_sketch_sweep(_t(buf.copy()), seed)
         ref = spec.sketch_tiles(seed, buf)
         assert np.array_equal(got.astype(np.uint64), ref)
 
@@ -150,8 +160,8 @@ def test_sweep_kernel_coverage_subset():
     rng = np.random.default_rng(3)
     subset = np.sort(rng.choice(full.size, size=full.size // 3, replace=False))
     got = run_sketch_sweep(
-        torch.from_numpy(buf.copy()), seed,
-        tile_ids=torch.from_numpy(subset.astype(np.int64)),
+        _t(buf.copy()), seed,
+        tile_ids=_t(subset.astype(np.int64)),
     )
     assert np.array_equal(got.astype(np.uint64), full[subset])
 
@@ -164,12 +174,12 @@ def moe_run():
     topk_ids = RNG.choice([0, 2, 3], size=(M, TOP_K)).astype(np.int32)
     seed = SLOT_SEEDS[1]
     c, partials, coverage = run_moe_gemm(
-        torch.from_numpy(a.copy()),
-        torch.from_numpy(b.copy()),
-        torch.from_numpy(topk_ids.copy()),
+        _t(a.copy()),
+        _t(b.copy()),
+        _t(topk_ids.copy()),
         seed,
     )
-    return a, b, topk_ids, seed, c.numpy(), partials, coverage
+    return a, b, topk_ids, seed, c.cpu().numpy(), partials, coverage
 
 
 def test_moe_kernel_gemm_correct(moe_run):
@@ -204,9 +214,9 @@ def test_moe_kernel_batch_invariance():
         topk_ids = np.full((m, TOP_K), 0, dtype=np.int32)
         topk_ids[:, 1] = 2
         _, partials, coverage = run_moe_gemm(
-            torch.from_numpy(a),
-            torch.from_numpy(b.copy()),
-            torch.from_numpy(topk_ids),
+            _t(a),
+            _t(b.copy()),
+            _t(topk_ids),
             seed,
         )
         outs.append((partials.copy(), coverage.copy()))
@@ -220,7 +230,7 @@ def test_fused_equals_sweep_on_covered_tiles(moe_run):
     can share one verifier."""
     _, b, topk_ids, seed, _, partials, coverage = moe_run
     sweep = run_sketch_sweep(
-        torch.from_numpy(weight_bytes(b).copy()), seed
+        _t(weight_bytes(b).copy()), seed
     )
     mask = coverage.astype(bool)
     assert np.array_equal(partials[mask], sweep[mask])
