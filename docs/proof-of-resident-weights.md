@@ -668,8 +668,14 @@ stake 缩放层原样套用。
   `verify_porw_block`（提取预摘要 → 从 PoT 导出 slot 挑战 → 全量校验）；
   快速路径升级为 `check_solution_signed`（注册 + 包络 + **设备签名**），
   故未签名/伪造的 solution 无法出块。
-- 余下：slot_worker 授权循环产出预摘要与区块封印、副本交叉核验调度、
-  模型治理流程；testnet。
+- ★ 已落地（P3 授权逻辑）：`claim_porw_slot`（选最优 solution + 构建
+  预摘要）、`porw_pre_digest_logs`/`porw_seal_digest`（header 日志）、
+  `verify_porw_seal`（设备节点密钥对区块 pre-hash 的封印,防 solution
+  被套到别的区块体）。授权侧与导入侧现共用同一套验证与 digest 载体,
+  各自单元测试齐备。
+- 余下（节点服务集成，非纯逻辑）：把 `claim_porw_slot` 接进活跃 slot
+  循环、候选 solution 由 attested `porw-agent`（尚不存在的组件，P4）
+  流式提供；副本交叉核验调度；模型治理流程；testnet。
 
 ### 8.3 降级路径（设计保险）
 - **无 CC 的消费卡**：不参与 PoRW 主抽签，可参与 P0 式 DRAM/显存审计放大的

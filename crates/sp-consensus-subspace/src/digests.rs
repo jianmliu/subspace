@@ -669,6 +669,15 @@ pub trait CompatiblePorwDigestItem: Sized {
 
     /// If this item is a PoRW pre-digest, return it.
     fn as_porw_pre_digest<RewardAddress: Decode>(&self) -> Option<PorwPreDigest<RewardAddress>>;
+
+    /// Construct a digest item carrying a PoRW block seal: the device node
+    /// key's ed25519 signature over the block pre-hash. Binds the pre-digest
+    /// to the specific block contents so a valid solution cannot be replayed
+    /// around a different body.
+    fn porw_seal(signature: [u8; 64]) -> Self;
+
+    /// If this item is a PoRW seal, return the signature.
+    fn as_porw_seal(&self) -> Option<[u8; 64]>;
 }
 
 impl CompatiblePorwDigestItem for DigestItem {
@@ -678,6 +687,14 @@ impl CompatiblePorwDigestItem for DigestItem {
 
     fn as_porw_pre_digest<RewardAddress: Decode>(&self) -> Option<PorwPreDigest<RewardAddress>> {
         self.pre_runtime_try_to(&PORW_ENGINE_ID)
+    }
+
+    fn porw_seal(signature: [u8; 64]) -> Self {
+        Self::Seal(PORW_ENGINE_ID, signature.encode())
+    }
+
+    fn as_porw_seal(&self) -> Option<[u8; 64]> {
+        self.seal_try_to(&PORW_ENGINE_ID)
     }
 }
 
