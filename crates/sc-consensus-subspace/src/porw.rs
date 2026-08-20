@@ -41,7 +41,12 @@ pub fn porw_solution_distance(
     global_challenge: &[u8; 32],
 ) -> SolutionRange {
     let slot_seed = derive_slot_seed(global_challenge, &solution.device_id);
-    let chunk = ticket_chunk(&solution.partials_root, slot_seed, solution.chunk_index);
+    let chunk = ticket_chunk(
+        &solution.model_id,
+        &solution.partials_root,
+        slot_seed,
+        solution.chunk_index,
+    );
     let chunk_as_range = SolutionRange::from_le_bytes(
         chunk[..size_of::<SolutionRange>()]
             .try_into()
@@ -108,6 +113,7 @@ mod tests {
             coverage_bytes: 1 << 30,
             m_t_millis: 1000,
             chunk_index: 0,
+            signature: [0u8; 64],
         };
         let challenge_a = [1u8; 32];
         let challenge_b = [2u8; 32];

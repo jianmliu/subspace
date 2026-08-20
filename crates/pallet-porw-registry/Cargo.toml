@@ -10,11 +10,13 @@ scale-info = { workspace = true, default-features = false, features = ["derive"]
 frame-support = { workspace = true, default-features = false }
 frame-system = { workspace = true, default-features = false }
 sp-runtime = { workspace = true, default-features = false }
+sp-io = { workspace = true, default-features = false }
+sp-core = { workspace = true, default-features = false }
 subspace-proof-of-residency = { workspace = true, default-features = false }
 
 [dev-dependencies]
-sp-io = { workspace = true, features = ["std"] }
 pallet-balances = { workspace = true, features = ["std"] }
+sp-core = { workspace = true, features = ["std", "full_crypto"] }
 
 [features]
 default = ["std"]
@@ -23,7 +25,8 @@ std = [
     "scale-info/std",
     "frame-support/std",
     "frame-system/std",
-    "sp-io/std",
     "sp-runtime/std",
+    "sp-io/std",
+    "sp-core/std",
     "subspace-proof-of-residency/std",
 ]

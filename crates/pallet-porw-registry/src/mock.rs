@@ -12,6 +12,28 @@ type Block = frame_system::mocking::MockBlock<Test>;
 pub const MEASUREMENT: Id32 = [0xAA; 32];
 pub const BOND: Balance = 100;
 
+/// A fixed ed25519 device key for tests. `pubkey()` / `sign(payload)` let
+/// tests produce solutions the registry will accept as device-signed.
+pub fn device_keypair() -> sp_core::ed25519::Pair {
+    use sp_core::Pair;
+    sp_core::ed25519::Pair::from_seed(&[7u8; 32])
+}
+
+pub fn device_pubkey() -> Id32 {
+    use sp_core::Pair;
+    device_keypair().public().0
+}
+
+pub fn sign_solution(
+    solution: &subspace_proof_of_residency::PorwSolution,
+    global_challenge: &Id32,
+) -> [u8; 64] {
+    use sp_core::Pair;
+    device_keypair()
+        .sign(&solution.signing_payload(global_challenge))
+        .0
+}
+
 #[derive(
     Encode, Decode, MaxEncodedLen, TypeInfo, Clone, Copy, Debug, PartialEq, Eq, Ord, PartialOrd,
 )]

@@ -193,9 +193,18 @@ pub fn check_envelope(coverage_bytes: u64, m_t_millis: u64, bandwidth_bytes_per_
 }
 
 /// Derive the `chunk_index`-th 32-byte audit chunk (lottery ticket) from a
-/// solution commitment, via blake3 XOF over (partials_root || slot_seed).
-pub fn ticket_chunk(partials_root: &Hash32, slot_seed: u32, chunk_index: u64) -> Hash32 {
+/// solution commitment, via blake3 XOF over
+/// (model_id || partials_root || slot_seed). `model_id` is mixed in so a
+/// device announcing several models cannot replay one ticket stream across
+/// all of them.
+pub fn ticket_chunk(
+    model_id: &Hash32,
+    partials_root: &Hash32,
+    slot_seed: u32,
+    chunk_index: u64,
+) -> Hash32 {
     let mut hasher = blake3::Hasher::new();
+    hasher.update(model_id);
     hasher.update(partials_root);
     hasher.update(&slot_seed.to_le_bytes());
     let mut reader = hasher.finalize_xof();
@@ -209,7 +218,7 @@ pub fn ticket_chunk(partials_root: &Hash32, slot_seed: u32, chunk_index: u64) ->
 // Solution and fraud proof types
 // ---------------------------------------------------------------------------
 
-/// PoRW solution: what a winning device submits alongside its signature.
+/// PoRW solution: what a winning device submits, signed by its node key.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, TypeInfo)]
 pub struct PorwSolution {
     /// Attested physical device (one card, one identity).
@@ -227,6 +236,29 @@ pub struct PorwSolution {
     pub m_t_millis: u64,
     /// Index of the winning ticket chunk.
     pub chunk_index: u64,
+    /// Ed25519 signature by the device's node key over
+    /// [`PorwSolution::signing_payload`]. Binds the solution to the device:
+    /// nothing else can be slashed for a solution it did not sign, and the
+    /// fraud path (and P3 block production) both verify it.
+    pub signature: [u8; 64],
+}
+
+impl PorwSolution {
+    /// Canonical bytes the device signs: every field except the signature,
+    /// plus the disputed slot's `global_challenge` (so a signature for one
+    /// slot cannot be replayed as a solution for another).
+    pub fn signing_payload(&self, global_challenge: &Hash32) -> Vec<u8> {
+        let mut out = Vec::with_capacity(32 * 4 + 8 * 3 + 4);
+        out.extend_from_slice(global_challenge);
+        out.extend_from_slice(&self.device_id);
+        out.extend_from_slice(&self.model_id);
+        out.extend_from_slice(&self.sketch.to_le_bytes());
+        out.extend_from_slice(&self.partials_root);
+        out.extend_from_slice(&self.coverage_bytes.to_le_bytes());
+        out.extend_from_slice(&self.m_t_millis.to_le_bytes());
+        out.extend_from_slice(&self.chunk_index.to_le_bytes());
+        out
+    }
 }
 
 /// Tile-granular fraud proof against a committed solution: shows that the

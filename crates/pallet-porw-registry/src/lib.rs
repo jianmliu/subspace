@@ -25,7 +25,7 @@ use frame_support::pallet_prelude::*;
 use frame_support::traits::fungible::{Inspect, InspectHold, MutateHold};
 use frame_support::traits::tokens::Precision;
 use frame_system::pallet_prelude::*;
-use sp_runtime::traits::AtLeast32BitUnsigned;
+use sp_runtime::traits::{AtLeast32BitUnsigned, Saturating};
 use subspace_proof_of_residency::{
     FraudVerdict, PorwSolution, TileFraudProof, check_envelope, verify_tile_fraud_proof,
 };
@@ -73,14 +73,22 @@ pub struct ModelInfo {
 
 /// Registered device metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, MaxEncodedLen, TypeInfo)]
-pub struct DeviceInfo<AccountId, BlockNumber> {
+pub struct DeviceInfo<AccountId, Balance, BlockNumber> {
     /// Account that bonded and controls this device.
     pub owner: AccountId,
+    /// Ed25519 public key of the device node key (generated in the CVM).
+    /// Solutions must be signed by the matching secret key — this is what
+    /// binds a solution to the device in the fraud path and in P3 block
+    /// production.
+    pub pubkey: Id32,
     /// Whitelisted agent-code measurement this device attested to.
     pub measurement: Id32,
     /// Registered hardware envelope: bytes the device can physically move
     /// through HBM in one slot. Caps claimed work (bounded-inflation bound).
     pub bandwidth_bytes_per_slot: u64,
+    /// Bond actually held at registration. Stored per-device so a later
+    /// change to the `BondAmount` constant cannot strand an existing bond.
+    pub bond: Balance,
     /// Registration block; the device joins the lottery only after the
     /// activation delay (the instant-rental deterrent).
     pub registered_at: BlockNumber,
@@ -140,8 +148,13 @@ pub mod pallet {
 
     /// Registered devices.
     #[pallet::storage]
-    pub type Devices<T: Config> =
-        StorageMap<_, Twox64Concat, Id32, DeviceInfo<T::AccountId, BlockNumberFor<T>>, OptionQuery>;
+    pub type Devices<T: Config> = StorageMap<
+        _,
+        Twox64Concat,
+        Id32,
+        DeviceInfo<T::AccountId, T::Balance, BlockNumberFor<T>>,
+        OptionQuery,
+    >;
 
     /// Which models a device has announced residency for.
     #[pallet::storage]
@@ -212,6 +225,8 @@ pub mod pallet {
         NotFraud,
         /// Solution's claimed model is not announced by the device.
         ModelNotAnnounced,
+        /// Solution is not signed by the accused device's node key.
+        BadSolutionSignature,
     }
 
     #[pallet::call]
@@ -273,6 +288,7 @@ pub mod pallet {
         pub fn register_device(
             origin: OriginFor<T>,
             device_id: Id32,
+            pubkey: Id32,
             bandwidth_bytes_per_slot: u64,
             evidence: alloc::vec::Vec<u8>,
         ) -> DispatchResult {
@@ -287,14 +303,17 @@ pub mod pallet {
                 Measurements::<T>::contains_key(measurement),
                 Error::<T>::UnknownMeasurement
             );
-            T::Currency::hold(&T::HoldReason::get(), &owner, T::BondAmount::get())
+            let bond = T::BondAmount::get();
+            T::Currency::hold(&T::HoldReason::get(), &owner, bond)
                 .map_err(|_| Error::<T>::BondFailed)?;
             Devices::<T>::insert(
                 device_id,
                 DeviceInfo {
                     owner: owner.clone(),
+                    pubkey,
                     measurement,
                     bandwidth_bytes_per_slot,
+                    bond,
                     registered_at: frame_system::Pallet::<T>::block_number(),
                 },
             );
@@ -302,7 +321,7 @@ pub mod pallet {
             Ok(())
         }
 
-        /// Deregister an owned device and release its bond.
+        /// Deregister an owned device and release its (stored) bond.
         #[pallet::call_index(4)]
         #[pallet::weight(Weight::zero())]
         pub fn deregister_device(origin: OriginFor<T>, device_id: Id32) -> DispatchResult {
@@ -312,8 +331,8 @@ pub mod pallet {
             T::Currency::release(
                 &T::HoldReason::get(),
                 &who,
-                T::BondAmount::get(),
-                Precision::Exact,
+                info.bond,
+                Precision::BestEffort,
             )
             .map_err(|_| Error::<T>::ReleaseFailed)?;
             Self::remove_device(&device_id);
@@ -364,16 +383,24 @@ pub mod pallet {
                 Models::<T>::contains_key(solution.model_id),
                 Error::<T>::UnknownModel
             );
+            // Bind the solution to the accused device: it can only be
+            // slashed for a solution its node key actually signed. Without
+            // this, anyone could fabricate a wrong solution for any device
+            // (tiles and Merkle paths are public) and steal its bond.
+            ensure!(
+                Self::verify_device_signature(&device.pubkey, &solution, &global_challenge),
+                Error::<T>::BadSolutionSignature
+            );
             let tile_idx = proof.tile_idx;
             match verify_tile_fraud_proof(&solution, &global_challenge, &solution.model_id, &proof)
             {
                 FraudVerdict::Fraud => {
-                    // Slash: move the held bond to the reporter.
+                    // Slash the device's stored bond to the reporter.
                     let _ = T::Currency::transfer_on_hold(
                         &T::HoldReason::get(),
                         &device.owner,
                         &reporter,
-                        T::BondAmount::get(),
+                        device.bond,
                         Precision::BestEffort,
                         frame_support::traits::tokens::Restriction::Free,
                         frame_support::traits::tokens::Fortitude::Force,
@@ -390,6 +417,31 @@ pub mod pallet {
                 FraudVerdict::Invalid => Err(Error::<T>::FraudProofInvalid.into()),
             }
         }
+
+        /// Withdraw a model announcement (device no longer holds it
+        /// resident). Decrements the replica count; the model can no longer
+        /// win the lottery from this device until re-announced.
+        #[pallet::call_index(7)]
+        #[pallet::weight(Weight::zero())]
+        pub fn withdraw_model(
+            origin: OriginFor<T>,
+            device_id: Id32,
+            model_id: Id32,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            let info = Devices::<T>::get(device_id).ok_or(Error::<T>::UnknownDevice)?;
+            ensure!(info.owner == who, Error::<T>::NotOwner);
+            ensure!(
+                DeviceModels::<T>::take(device_id, model_id).is_some(),
+                Error::<T>::ModelNotAnnounced
+            );
+            ReplicaCount::<T>::mutate(model_id, |c| *c = c.saturating_sub(1));
+            Self::deposit_event(Event::ModelWithdrawn {
+                device_id,
+                model_id,
+            });
+            Ok(())
+        }
     }
 
     impl<T: Config> Pallet<T> {
@@ -401,7 +453,11 @@ pub mod pallet {
             let device =
                 Devices::<T>::get(solution.device_id).ok_or(SolutionRejection::UnknownDevice)?;
             let now = frame_system::Pallet::<T>::block_number();
-            if now < device.registered_at + T::ActivationDelay::get() {
+            if now
+                < device
+                    .registered_at
+                    .saturating_add(T::ActivationDelay::get())
+            {
                 return Err(SolutionRejection::DeviceInactive);
             }
             if !Measurements::<T>::contains_key(device.measurement) {
@@ -428,6 +484,22 @@ pub mod pallet {
                 ReplicaCount::<T>::mutate(model_id, |c| *c = c.saturating_sub(1));
             }
             Devices::<T>::remove(device_id);
+        }
+
+        /// Verify the device node key's ed25519 signature over the solution's
+        /// signing payload (all fields except the signature, plus the slot's
+        /// global challenge).
+        fn verify_device_signature(
+            pubkey: &Id32,
+            solution: &PorwSolution,
+            global_challenge: &Id32,
+        ) -> bool {
+            let payload = solution.signing_payload(global_challenge);
+            sp_io::crypto::ed25519_verify(
+                &sp_core::ed25519::Signature::from_raw(solution.signature),
+                &payload,
+                &sp_core::ed25519::Public::from_raw(*pubkey),
+            )
         }
     }
 }

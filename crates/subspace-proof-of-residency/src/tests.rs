@@ -123,10 +123,22 @@ fn envelope_and_tickets() {
     let unit = 1 << 30;
     assert_eq!(ticket_count(cov, 1000, unit), 70);
     assert_eq!(ticket_count(cov, 2000, unit), 140);
-    // Distinct chunk indexes yield distinct tickets.
+    // Distinct chunk indexes, slot seeds and models yield distinct tickets.
+    let model = [3u8; 32];
     let root = [7u8; 32];
-    assert_ne!(ticket_chunk(&root, 1, 0), ticket_chunk(&root, 1, 1));
-    assert_ne!(ticket_chunk(&root, 1, 0), ticket_chunk(&root, 2, 0));
+    assert_ne!(
+        ticket_chunk(&model, &root, 1, 0),
+        ticket_chunk(&model, &root, 1, 1)
+    );
+    assert_ne!(
+        ticket_chunk(&model, &root, 1, 0),
+        ticket_chunk(&model, &root, 2, 0)
+    );
+    let model2 = [4u8; 32];
+    assert_ne!(
+        ticket_chunk(&model, &root, 1, 0),
+        ticket_chunk(&model2, &root, 1, 0)
+    );
 }
 
 fn build_solution_and_proofs(
@@ -167,6 +179,7 @@ fn build_solution_and_proofs(
         coverage_bytes: (N_TILES * TILE_BYTES) as u64,
         m_t_millis: 1000,
         chunk_index: 0,
+        signature: [0u8; 64],
     };
 
     let proofs = (0..N_TILES)

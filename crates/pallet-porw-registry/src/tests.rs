@@ -49,6 +49,7 @@ fn setup_registered_device() -> (Id32, Vec<[u8; TILE_BYTES]>, Vec<Hash32>) {
     assert_ok!(Registry::register_device(
         RuntimeOrigin::signed(1),
         DEVICE,
+        device_pubkey(),
         1 << 30, // 1 GiB/slot envelope
         DEVICE.to_vec(),
     ));
@@ -79,7 +80,7 @@ fn build_solution(
         .enumerate()
         .map(|(i, s)| partials_leaf(i as u64, *s))
         .collect();
-    let solution = PorwSolution {
+    let mut solution = PorwSolution {
         device_id: DEVICE,
         model_id,
         sketch: s_tiles.iter().fold(0u32, |a, s| a.wrapping_add(*s)),
@@ -87,7 +88,9 @@ fn build_solution(
         coverage_bytes: (N_TILES * TILE_BYTES) as u64,
         m_t_millis: 1000,
         chunk_index: 0,
+        signature: [0u8; 64],
     };
+    solution.signature = sign_solution(&solution, &CHALLENGE);
     (solution, s_tiles, partial_leaves)
 }
 
@@ -130,9 +133,10 @@ fn register_device_holds_bond_and_activates_after_delay() {
 #[test]
 fn registration_requires_valid_attestation_and_whitelisted_measurement() {
     new_test_ext().execute_with(|| {
+        let pk = device_pubkey();
         // Whitelist missing: stub attestation verifies but measurement unknown.
         assert_noop!(
-            Registry::register_device(RuntimeOrigin::signed(1), DEVICE, 1, DEVICE.to_vec()),
+            Registry::register_device(RuntimeOrigin::signed(1), DEVICE, pk, 1, DEVICE.to_vec()),
             Error::<Test>::UnknownMeasurement
         );
         assert_ok!(Registry::register_measurement(
@@ -141,17 +145,18 @@ fn registration_requires_valid_attestation_and_whitelisted_measurement() {
         ));
         // Bad evidence: attestation fails.
         assert_noop!(
-            Registry::register_device(RuntimeOrigin::signed(1), DEVICE, 1, vec![0; 4]),
+            Registry::register_device(RuntimeOrigin::signed(1), DEVICE, pk, 1, vec![0; 4]),
             Error::<Test>::AttestationInvalid
         );
         assert_ok!(Registry::register_device(
             RuntimeOrigin::signed(1),
             DEVICE,
+            pk,
             1,
             DEVICE.to_vec()
         ));
         assert_noop!(
-            Registry::register_device(RuntimeOrigin::signed(2), DEVICE, 1, DEVICE.to_vec()),
+            Registry::register_device(RuntimeOrigin::signed(2), DEVICE, pk, 1, DEVICE.to_vec()),
             Error::<Test>::DeviceExists
         );
     });
@@ -243,5 +248,59 @@ fn honest_solution_cannot_be_slashed() {
         );
         // Bond untouched.
         assert_eq!(Balances::balance_on_hold(&HoldReason::get(), &1), BOND);
+    });
+}
+
+#[test]
+fn fabricated_unsigned_solution_cannot_slash() {
+    new_test_ext().execute_with(|| {
+        let (model_id, tiles, weight_leaves) = setup_registered_device();
+        // Attacker fabricates a wrong solution for the victim device using
+        // only public data (tiles + Merkle paths) and does NOT sign it with
+        // the device key (they can't).
+        let (mut solution, s_tiles, partial_leaves) = build_solution(model_id, &tiles, Some(2));
+        solution.signature = [0u8; 64]; // no valid device signature
+
+        let proof = TileFraudProof {
+            tile_idx: 2,
+            claimed_s_tile: s_tiles[2],
+            partials_proof: merkle_proof(&partial_leaves, 2),
+            tile_bytes: tiles[2].to_vec(),
+            weights_proof: merkle_proof(&weight_leaves, 2),
+        };
+        assert_noop!(
+            Registry::report_fraud(RuntimeOrigin::signed(2), solution, CHALLENGE, proof),
+            Error::<Test>::BadSolutionSignature
+        );
+        // Victim's bond is safe and device still registered.
+        assert_eq!(Balances::balance_on_hold(&HoldReason::get(), &1), BOND);
+        assert!(Devices::<Test>::get(DEVICE).is_some());
+    });
+}
+
+#[test]
+fn withdraw_model_decrements_replicas_and_gates_solutions() {
+    new_test_ext().execute_with(|| {
+        let (model_id, tiles, _) = setup_registered_device();
+        System::set_block_number(11);
+        let (solution, ..) = build_solution(model_id, &tiles, None);
+        assert_ok!(Registry::check_solution(&solution));
+        assert_eq!(ReplicaCount::<Test>::get(model_id), 1);
+
+        assert_ok!(Registry::withdraw_model(
+            RuntimeOrigin::signed(1),
+            DEVICE,
+            model_id
+        ));
+        assert_eq!(ReplicaCount::<Test>::get(model_id), 0);
+        assert_eq!(
+            Registry::check_solution(&solution),
+            Err(SolutionRejection::ModelNotAnnounced)
+        );
+        // Withdrawing again fails; device stays registered.
+        assert_noop!(
+            Registry::withdraw_model(RuntimeOrigin::signed(1), DEVICE, model_id),
+            Error::<Test>::ModelNotAnnounced
+        );
     });
 }
