@@ -21,14 +21,34 @@ fi
 cd subspace/porw-poc
 
 echo "== Python env =="
-PY=python3
-if ! $PY -c 'import torch; assert torch.cuda.is_available()' 2>/dev/null; then
-  echo "torch+cuda not found; creating venv (downloads CUDA wheels, ~a few GB)"
-  $PY -m venv "$WORK/venv" && source "$WORK/venv/bin/activate" && PY=python
-  pip install -q --upgrade pip
-  pip install -q torch numpy
+has_cuda_torch() { "$1" -c 'import torch; assert torch.cuda.is_available()' >/dev/null 2>&1; }
+
+PY=""
+# 1) 显式指定: PORW_PYTHON=/path/to/python
+if [ -n "${PORW_PYTHON:-}" ] && has_cuda_torch "$PORW_PYTHON"; then
+  PY="$PORW_PYTHON"
+# 2) 当前 python3 已可用
+elif has_cuda_torch python3; then
+  PY=python3
+else
+  # 3) 扫描 conda/venv 环境 (含 voicechat 这类已配好的环境)
+  for p in \
+    $(conda env list 2>/dev/null | awk '$NF ~ /^\// {print $NF"/bin/python"}') \
+    ~/miniconda3/envs/*/bin/python ~/anaconda3/envs/*/bin/python \
+    ~/*/venv/bin/python ~/venv*/bin/python "$WORK/venv/bin/python"; do
+    if [ -x "$p" ] && has_cuda_torch "$p"; then PY="$p"; break; fi
+  done
 fi
-$PY -m pip install -q triton pytest numpy 2>/dev/null || pip install -q triton pytest numpy
+# 4) 兜底: 新建 venv, 用 cu121 索引装 CUDA 版 torch
+if [ -z "$PY" ]; then
+  echo "no torch+cuda env found; creating venv (downloads CUDA wheels, ~a few GB)"
+  python3 -m venv "$WORK/venv" && source "$WORK/venv/bin/activate" && PY="$WORK/venv/bin/python"
+  "$PY" -m pip install -q --upgrade pip
+  "$PY" -m pip install -q torch numpy --index-url https://download.pytorch.org/whl/cu121
+fi
+echo "using python: $PY"
+"$PY" -m pip install -q triton pytest numpy 2>/dev/null \
+  || echo "note: pip install into $PY failed; assuming deps already present"
 $PY - <<'EOF'
 import torch, triton
 print("torch", torch.__version__, "| triton", triton.__version__,
