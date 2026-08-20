@@ -479,34 +479,56 @@ SSD 上（显存太贵、存不下历史的问题消解）；chiapos/KZG/plottin
 bond 罚没使得已注册算力作恶有直接经济损失；与 Subspace 一样，PoT 保证无法
 通过快算未来挑战做 long-range 攻击。
 
-### 6.4 保真押金（bond）vs 质押权重（stake）：PoRW 需要前者、不需要后者
+### 6.4 stake 的三种角色：门控保留、有界调节、保真押金
 
-一个原则性澄清，避免把 PoRW 误做成 PoS：
+关键原则：**容量（驻留）永远是硬门控，stake 绝不取代它**。但在此前提下
+stake 有三个正当角色。区分它们，避免把 PoRW 误做成纯 PoS。
 
-**Subspace 无需 stake，因为它不含任何可信断言**——存储自证，要么审计读得出、
-要么读不出，没有可撒谎处，也就无物可罚没。**PoRW 用 TEE 换掉密码学唯一性，
-引入了两处可信断言**，故需要一笔押金去威慑撒谎，但仅此而已：
+**必须拒绝的：纯 PoS（票数 ∝ stake，无容量门控）**——那样富人不驻留也能
+出块，VRAM 证明沦为摆设。这是唯一的红线。
 
-1. 服务量乘数 `m_t`（§4.4）由被度量的 agent 自报，硬件包络只封上限、
-   包络内仍可虚报；
-2. TEE 被攻破时的 sketch 伪造（§6.2）需要一个可罚没对象。
+**采用的：容量门控 + 有界 sqrt 质押调节**（本仓库 `PoS` 分支的机制）。
+`scale_solution_range` 把中签判定 `solution_distance ≤ scaled_range/2` 中的
+range 按 `sqrt(stake)/sqrt(MaxVotingBalance)` 缩放，即：
 
-因此 **bond 恰好、且仅仅出现在 PoRW 依赖信任的位置**。三条必须守住的边界：
+```
+中签概率 ∝ |C_t|(驻留) × m_t(服务) × sqrt(有效质押)/sqrt(上限)
+             └──── 容量门控，零则出局 ────┘   └─ 有界经济对齐 ─┘
+```
 
-| | fidelity bond（PoRW 需要） | consensus stake（PoRW 拒绝） |
-|---|---|---|
-| 抽签权重来源 | ∝ 驻留字节 × 服务量（容量本位） | ∝ stake ⇒ 退化为 PoS，VRAM 证明失去意义 |
-| 押金定价基准 | ∝ 作弊机会（≈ 一 epoch 收益的有界倍数） | ∝ 声明容量 ⇒ 资本门槛，摧毁「插上闲卡即挖」 |
-| 防即时租卡 | 由注册生效延迟承担（顶替 plotting 慢） | — |
+该分支的三个设计恰好守住了红线，值得原样采纳：
 
-- **long-range / nothing-at-stake** 由继承的 PoT 硬时钟接住，与 Subspace 一样，
-  无需 stake 补足。
-- **domain operator 层的 staking 与本设计正交**：Subspace 的 decoupled
-  execution 中 operator 本就质押（执行层），PoRW 只改共识层（出块权），
-  二者分离、可直接叠加。
-- **实现复用**：PoS 分支的 staking pallet（锁定/解锁/罚没记账）可作为
-  fidelity bond 与乐观验证保证金（§3.2）的实现底座——**复用管道，不复用
-  「票数 ∝ stake」的语义**。
+- **容量仍是门控**：零容量 = 零 solution candidate = 零权重，stake 再多无用
+  ⇒ VRAM 驻留证明不是摆设；
+- **`sqrt` 次线性 + `MaxVotingBalance` 硬封顶**：翻倍影响力需 4× 质押，且
+  超过上限的巨鲸与刚到顶者等权 ⇒ 强反财阀，stake 买不到无界影响；
+- **零总质押 → 退化为纯容量共识**（`voting_stake_weight` 返回 max_weight）
+  ⇒ staking 是叠加项而非网络必需，可平滑启用。
+
+**保真押金（fidelity bond）——与上面的调节质押可合一**。PoRW 用 TEE 换掉
+密码学唯一性，引入两处可信断言需押金威慑：(1) 服务量 `m_t`（§4.4）agent
+自报、包络内可虚报；(2) TEE 被攻破时的 sketch 伪造（§6.2）需可罚没对象。
+同一笔质押既作罚没抵押、又经 sqrt 给奖励加成——bond 与调节合一，一石二鸟。
+
+两个协同与一个张力：
+
+- **协同 1**：stake 顺带给代币一个与用量成正比的锁定需求，补上 §5.2
+  tokenomics 的「纯通胀风险」对冲。
+- **协同 2**：`domain operator` 层的 staking（Subspace 执行层本就有）与此
+  正交，可直接叠加。
+- **张力**：PoRW 本欲让奖励跟随有用服务（`m_t`、费用燃烧），stake 调节让
+  奖励同时（次线性地）跟随资本。`sqrt` + `cap` 正是把资本这一维压住、
+  不让其盖过驻留与服务的旋钮——这是治理权衡，`MaxVotingBalance` /
+  `MinVotingBalance` / sqrt 曲率是可调参数。
+
+**long-range / nothing-at-stake** 由继承的 PoT 硬时钟接住，与 Subspace 一样，
+不依赖 stake 补足。
+
+**实现落地**：直接复用 `PoS` 分支——`pallet-voting-stake` +
+`scale_solution_range` + `voting_stake_weight/max_voting_stake_weight`
+runtime API。PoRW 侧唯一需替换的是被缩放的「base 容量」语义：从
+Subspace 的纯 plot 容量，改为 `|C_t| × m_t`（驻留 × 服务，§4.3–4.4），
+stake 缩放层原样套用。
 
 ## 7. 与现有代码的映射
 
