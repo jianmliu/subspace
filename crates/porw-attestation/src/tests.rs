@@ -72,11 +72,12 @@ fn untrusted_root_is_rejected() {
         verify_evidence(&[], &w.device_id, &w.node_pubkey, &ev),
         Err(AttestationError::UntrustedRoot)
     );
-    // A different root than the one that signed the cert.
+    // A different root than the one that signed the cert: no configured root
+    // verifies the cert signature, so it is untrusted.
     let other_root = ed25519::Pair::from_seed(&[9u8; 32]).public().0;
     assert_eq!(
         verify_evidence(&[other_root], &w.device_id, &w.node_pubkey, &ev),
-        Err(AttestationError::BadDeviceCert)
+        Err(AttestationError::UntrustedRoot)
     );
 }
 
@@ -91,9 +92,11 @@ fn forged_device_cert_is_rejected() {
     let attacker = ed25519::Pair::from_seed(&[7u8; 32]);
     ev.cert.device_pubkey = attacker.public().0;
     ev.report.report_sig = attacker.sign(&ev.report.body()).0;
+    // Swapping device_pubkey changes the cert body, so the trusted root's
+    // vendor signature no longer verifies it — the cert is not vouched for.
     assert_eq!(
         verify_evidence(&roots, &w.device_id, &w.node_pubkey, &ev),
-        Err(AttestationError::BadDeviceCert)
+        Err(AttestationError::UntrustedRoot)
     );
 }
 

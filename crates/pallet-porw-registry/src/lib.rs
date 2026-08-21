@@ -173,6 +173,13 @@ pub mod pallet {
         /// Blocks between registration and lottery eligibility.
         #[pallet::constant]
         type ActivationDelay: Get<BlockNumberFor<Self>>;
+
+        /// Blocks per settlement epoch. Demand EMA folds and reward-weight
+        /// recomputation happen at most once per epoch (`block / EpochLength`),
+        /// which bounds the per-block settlement cost and stops the demand EMA
+        /// from being decayed more than once per epoch. Must be non-zero.
+        #[pallet::constant]
+        type EpochLength: Get<BlockNumberFor<Self>>;
     }
 
     /// Whitelisted agent-code measurements (governance-managed).
@@ -216,6 +223,31 @@ pub mod pallet {
     /// at `MaxModelWeight`. This is what the reward-distribution layer reads.
     #[pallet::storage]
     pub type ModelWeight<T: Config> = StorageMap<_, Twox64Concat, Id32, u32, ValueQuery>;
+
+    /// Highest epoch index that has been settled. `None` = never settled.
+    /// Settlement is idempotent per epoch: a settle whose target epoch is not
+    /// strictly greater than this value is a no-op.
+    #[pallet::storage]
+    pub type SettledThroughEpoch<T: Config> = StorageValue<_, u64, OptionQuery>;
+
+    #[pallet::hooks]
+    impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
+        /// Settle any elapsed epoch once per block. Cheap in the common case:
+        /// [`Self::try_settle_epoch`] short-circuits when the current epoch is
+        /// already settled, so the fold loop only runs on epoch boundaries.
+        fn on_initialize(_now: BlockNumberFor<T>) -> Weight {
+            // Always at least one read (SettledThroughEpoch); the per-model
+            // fold sweep runs only when crossing into a new epoch.
+            match Self::try_settle_epoch() {
+                Some(models) => {
+                    let m = u64::from(models);
+                    // read+write per model, plus the epoch-marker read+write.
+                    T::DbWeight::get().reads_writes(m + 1, m + 1)
+                }
+                None => T::DbWeight::get().reads(1),
+            }
+        }
+    }
 
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
@@ -403,39 +435,17 @@ pub mod pallet {
             Ok(())
         }
 
-        /// Settle the epoch: fold each model's pending burned fees into its
-        /// demand EMA and recompute its effective reward weight
-        /// `max(floor, demand_ema / FeePerWeightUnit)` capped at
-        /// `MaxModelWeight`. Permissionless (idempotent per epoch); production
-        /// runs this from an `on_initialize` hook every epoch.
+        /// Manually trigger epoch settlement. **Idempotent per epoch**: if the
+        /// current epoch has already been settled (by a prior call or the
+        /// `on_initialize` hook) this is a no-op, so it cannot be spammed to
+        /// repeatedly decay the demand EMA. Settlement also runs automatically
+        /// once per epoch from `on_initialize`; this call only advances it
+        /// early within an unsettled epoch.
         #[pallet::call_index(11)]
         #[pallet::weight(Weight::zero())]
         pub fn settle_epoch(origin: OriginFor<T>) -> DispatchResult {
             ensure_signed(origin)?;
-            let n = u128::from(T::DemandEmaSmoothing::get().max(1));
-            let unit = T::FeePerWeightUnit::get().saturated_into::<u128>().max(1);
-            let max_weight = T::MaxModelWeight::get();
-            let mut count = 0u32;
-            let model_ids: alloc::vec::Vec<Id32> = Models::<T>::iter_keys().collect();
-            for model_id in model_ids {
-                Models::<T>::mutate(model_id, |maybe| {
-                    if let Some(info) = maybe {
-                        let pending = PendingFees::<T>::take(model_id);
-                        // ema = (ema*(n-1) + pending) / n
-                        info.demand_ema = info
-                            .demand_ema
-                            .saturating_mul(n - 1)
-                            .saturating_add(pending)
-                            / n;
-                        let demand_weight =
-                            (info.demand_ema / unit).min(u128::from(max_weight)) as u32;
-                        let effective = demand_weight.max(info.floor_weight).min(max_weight);
-                        ModelWeight::<T>::insert(model_id, effective);
-                        count += 1;
-                    }
-                });
-            }
-            Self::deposit_event(Event::EpochSettled { models: count });
+            Self::try_settle_epoch();
             Ok(())
         }
 
@@ -670,6 +680,74 @@ pub mod pallet {
         /// distribution layer reads). Zero for an unknown model.
         pub fn model_reward_weight(model_id: &Id32) -> u32 {
             ModelWeight::<T>::get(model_id)
+        }
+
+        /// Registered ed25519 node public key of a device, or `None` if the
+        /// device is not registered. Block import reads this to verify the
+        /// block seal against the solution's device.
+        pub fn device_node_key(device_id: &Id32) -> Option<Id32> {
+            Devices::<T>::get(device_id).map(|d| d.pubkey)
+        }
+
+        /// Settle the current epoch if it has not been settled yet. Idempotent
+        /// per epoch: folding runs at most once per epoch index, so neither a
+        /// spammed extrinsic nor repeated hook invocations within one epoch can
+        /// decay the demand EMA more than once.
+        ///
+        /// Folds exactly once when crossing into a new epoch (never a catch-up
+        /// sweep of skipped epochs): the `on_initialize` hook runs every block,
+        /// so in production no epoch boundary is ever missed, and folding only
+        /// the newest epoch keeps the per-block cost `O(models)` and bounded.
+        ///
+        /// Returns `Some(models_folded)` when a fold ran (for weight
+        /// accounting), or `None` when the current epoch was already settled.
+        fn try_settle_epoch() -> Option<u32> {
+            let epoch_len = T::EpochLength::get();
+            if epoch_len.is_zero() {
+                return None;
+            }
+            let now = frame_system::Pallet::<T>::block_number();
+            let current_epoch: u64 = (now / epoch_len).saturated_into();
+            if let Some(e) = SettledThroughEpoch::<T>::get() {
+                if e >= current_epoch {
+                    return None;
+                }
+            }
+            let folded = Self::fold_demand_epoch();
+            SettledThroughEpoch::<T>::put(current_epoch);
+            Some(folded)
+        }
+
+        /// Fold one epoch's pending fees into each model's demand EMA and
+        /// recompute its effective reward weight
+        /// `clamp(demand_ema / FeePerWeightUnit, floor, MaxModelWeight)`.
+        /// Returns the number of models folded.
+        fn fold_demand_epoch() -> u32 {
+            let n = u128::from(T::DemandEmaSmoothing::get().max(1));
+            let unit = T::FeePerWeightUnit::get().saturated_into::<u128>().max(1);
+            let max_weight = T::MaxModelWeight::get();
+            let mut count = 0u32;
+            let model_ids: alloc::vec::Vec<Id32> = Models::<T>::iter_keys().collect();
+            for model_id in model_ids {
+                Models::<T>::mutate(model_id, |maybe| {
+                    if let Some(info) = maybe {
+                        let pending = PendingFees::<T>::take(model_id);
+                        // ema = (ema*(n-1) + pending) / n
+                        info.demand_ema = info
+                            .demand_ema
+                            .saturating_mul(n - 1)
+                            .saturating_add(pending)
+                            / n;
+                        let demand_weight =
+                            (info.demand_ema / unit).min(u128::from(max_weight)) as u32;
+                        let effective = demand_weight.max(info.floor_weight).min(max_weight);
+                        ModelWeight::<T>::insert(model_id, effective);
+                        count += 1;
+                    }
+                });
+            }
+            Self::deposit_event(Event::EpochSettled { models: count });
+            count
         }
 
         fn remove_device(device_id: &Id32) {

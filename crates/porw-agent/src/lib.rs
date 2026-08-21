@@ -57,6 +57,10 @@ pub enum AgentError {
     /// The coverage set referenced a tile the resident model does not have.
     #[error("coverage tile {tile} out of range (model has {tile_count} tiles)")]
     CoverageOutOfRange { tile: u64, tile_count: u64 },
+    /// The slot's coverage and service multiplier earned zero lottery tickets,
+    /// so there is nothing to author (the chain would reject any solution).
+    #[error("coverage/multiplier earned zero tickets this slot")]
+    NoTickets,
 }
 
 /// The PoRW agent: node key + resident model backend + lifecycle.
@@ -140,12 +144,7 @@ impl<B: SketchBackend> PorwAgent<B> {
             model_id: self.model_id,
             ticket_unit: self.ticket_unit,
         };
-        Ok(assemble_solution(
-            &self.backend,
-            &self.node_key,
-            &params,
-            ctx,
-        ))
+        assemble_solution(&self.backend, &self.node_key, &params, ctx).ok_or(AgentError::NoTickets)
     }
 }
 

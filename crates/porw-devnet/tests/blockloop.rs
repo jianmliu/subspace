@@ -92,6 +92,14 @@ sp_api::mock_impl_runtime_apis! {
             }
             Some(ticket_count(solution.coverage_bytes, solution.m_t_millis, TICKET_UNIT))
         }
+
+        fn device_node_key(&self, device_id: [u8; 32]) -> Option<[u8; 32]> {
+            if device_id == DEVICE_ID {
+                Some(self.device_pubkey)
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -261,12 +269,17 @@ fn a_block_with_a_foreign_seal_is_rejected() {
         Default::default(),
         digest,
     );
-    // Seal with a different key: the pre-digest still imports (it is device-
-    // signed), but the block seal does not match the device node key.
+    // Seal with a different key: the pre-digest is device-signed and would
+    // pass the solution check, but the seal does not match the device node
+    // key, so `verify_porw_block` rejects the block on import.
     let foreign = sp_core::ed25519::Pair::from_seed(&[0x99; 32]);
     let header = seal_header(header, &foreign);
     assert!(
         !check_seal(&header, &node_pubkey),
-        "a foreign seal must be rejected"
+        "a foreign seal must be rejected by the standalone seal check"
     );
+    let err =
+        verify_porw_block::<Block, _, u64>(&client, Default::default(), &header, u64::MAX, 0, 0)
+            .expect_err("import must reject a block whose seal is not the device's");
+    assert_eq!(err, sc_consensus_subspace::porw::PorwSolutionError::BadSeal);
 }

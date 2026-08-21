@@ -121,10 +121,11 @@ impl Evidence {
 /// Why attestation verification failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttestationError {
-    /// The vendor root that signed the device cert is not trusted.
+    /// No trusted vendor root vouches for the device cert: either no roots are
+    /// configured, or none of the configured roots' keys verify the cert's
+    /// vendor signature (an unknown signer and a corrupt/tampered signature are
+    /// indistinguishable to ed25519, so both collapse here).
     UntrustedRoot,
-    /// The device cert's vendor signature did not verify.
-    BadDeviceCert,
     /// The report's device-identity signature did not verify.
     BadReport,
     /// The evidence does not bind the claimed device id.
@@ -168,17 +169,17 @@ pub fn verify_evidence(
     }
 
     // Link 1: a trusted vendor root signed the device identity certificate.
-    let root_ok = trusted_roots
-        .iter()
-        .any(|root| ed25519_verify(&cert.vendor_sig, &cert.body(), root));
+    // With no anchors configured nothing can be trusted; and a cert no trusted
+    // root's key verifies is untrusted (whether signed by an unknown root or
+    // corrupt — ed25519 cannot distinguish, and both mean "not vouched for").
     if trusted_roots.is_empty() {
         return Err(AttestationError::UntrustedRoot);
     }
+    let root_ok = trusted_roots
+        .iter()
+        .any(|root| ed25519_verify(&cert.vendor_sig, &cert.body(), root));
     if !root_ok {
-        // Distinguish "no trusted root matched" from a malformed signature by
-        // checking whether ANY key would have accepted it is not possible;
-        // report the chain failure at the cert link.
-        return Err(AttestationError::BadDeviceCert);
+        return Err(AttestationError::UntrustedRoot);
     }
 
     // Link 2: the device identity key signed the attestation report.

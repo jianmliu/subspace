@@ -125,6 +125,9 @@ impl pallet_porw_registry::Config for Test {
     type Attestation = PorwAttestation;
     type BondAmount = BondAmount;
     type ActivationDelay = ConstU64<10>;
+    // One block per epoch keeps the tokenomics tests legible: advancing the
+    // block number by one between settlements crosses exactly one epoch.
+    type EpochLength = ConstU64<1>;
 }
 
 pub fn new_test_ext() -> sp_io::TestExternalities {

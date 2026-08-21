@@ -11,8 +11,11 @@ pub type Balance = u128;
 pub type Block = frame_system::mocking::MockBlock<Test>;
 
 pub const BOND: Balance = 100;
-/// Bytes of audited traffic per lottery ticket (matches the runtime constant).
-pub const TICKET_UNIT: u64 = 1 << 30;
+/// Bytes of audited traffic per lottery ticket. Production uses `1 << 30`
+/// (1 GiB); at devnet scale one ticket per tile keeps the small coverage sets
+/// in these tests above the zero-ticket floor (a full GiB unit would earn no
+/// ticket for a handful of 4 KiB tiles).
+pub const TICKET_UNIT: u64 = subspace_proof_of_residency::TILE_BYTES as u64;
 
 #[derive(
     Encode, Decode, MaxEncodedLen, TypeInfo, Clone, Copy, Debug, PartialEq, Eq, Ord, PartialOrd,
@@ -67,6 +70,7 @@ impl pallet_porw_registry::Config for Test {
     type Attestation = pallet_porw_registry::PorwAttestation;
     type BondAmount = BondAmount;
     type ActivationDelay = ConstU64<ACTIVATION_DELAY>;
+    type EpochLength = ConstU64<10>;
 }
 
 pub fn new_test_ext() -> sp_io::TestExternalities {

@@ -47,13 +47,16 @@ fn le_u64_prefix(bytes: &[u8; 32]) -> u64 {
 /// Assemble a signed solution for the slot, choosing the best (lowest
 /// ring-distance to the challenge) ticket among those the coverage/multiplier
 /// authorize. Returns the solution and its distance (the node decides whether
-/// it clears the current solution range).
+/// it clears the current solution range), or `None` when the coverage and
+/// service multiplier earn zero tickets — the exact same `ticket_count` the
+/// chain computes, so the agent never emits a solution the chain would reject
+/// as `ChunkOutOfRange`.
 pub fn assemble_solution<B: SketchBackend>(
     backend: &B,
     node_key: &ed25519::Pair,
     params: &SolutionParams,
     ctx: &SlotContext,
-) -> (PorwSolution, u64) {
+) -> Option<(PorwSolution, u64)> {
     let slot_seed = derive_slot_seed(&ctx.global_challenge, &params.device_id);
 
     // Per-tile sketches over the coverage set, and their Merkle commitment.
@@ -68,7 +71,12 @@ pub fn assemble_solution<B: SketchBackend>(
     let folded = partials.iter().fold(0u32, |a, s| a.wrapping_add(*s));
 
     let coverage_bytes = (ctx.coverage.len() * TILE) as u64;
-    let tickets = ticket_count(coverage_bytes, ctx.m_t_millis, params.ticket_unit).max(1);
+    // Raw ticket count — identical to the chain's. Zero tickets means the slot
+    // earned no lottery entry, so there is nothing to author.
+    let tickets = ticket_count(coverage_bytes, ctx.m_t_millis, params.ticket_unit);
+    if tickets == 0 {
+        return None;
+    }
 
     // Pick the best ticket (lowest distance to the challenge). This mirrors the
     // farmer picking its best audit chunk; the node re-derives and checks it.
@@ -96,5 +104,5 @@ pub fn assemble_solution<B: SketchBackend>(
     solution.signature = node_key
         .sign(&solution.signing_payload(&ctx.global_challenge))
         .0;
-    (solution, distance)
+    Some((solution, distance))
 }

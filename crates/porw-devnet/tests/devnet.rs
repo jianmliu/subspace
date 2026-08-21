@@ -117,12 +117,15 @@ fn agent_solution_is_accepted_by_the_chain_fast_path() {
         // and the chosen ticket is within the tickets the coverage authorizes.
         let solution_range = u64::MAX;
         assert!(distance <= solution_range / 2);
+        // The agent only authors when the coverage earns at least one ticket,
+        // and never picks a chunk beyond that count (the fast path enforces the
+        // same bound on import).
         let tickets = subspace_proof_of_residency::ticket_count(
             solution.coverage_bytes,
             solution.m_t_millis,
             TICKET_UNIT,
-        )
-        .max(1);
+        );
+        assert!(tickets >= 1);
         assert!(solution.chunk_index < tickets);
     });
 }

@@ -615,6 +615,14 @@ sp_api::decl_runtime_apis! {
             solution: subspace_proof_of_residency::PorwSolution,
             global_challenge: [u8; 32],
         ) -> Option<u64>;
+
+        /// The registered ed25519 node public key of `device_id`, or `None` if
+        /// the device is not registered. Used on block import to verify the
+        /// block seal (the device key's signature over the block pre-hash),
+        /// which binds the device-signed pre-digest to this specific block
+        /// body — a binding the pre-digest signature (over the slot challenge
+        /// only) does not provide.
+        fn device_node_key(device_id: [u8; 32]) -> Option<[u8; 32]>;
     }
 
     /// API necessary for block authorship with Subspace.

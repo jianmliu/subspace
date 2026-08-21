@@ -1,6 +1,6 @@
 use crate::mock::*;
-use crate::{Devices, Error, Id32, ModelWeight, Models, ReplicaCount, SolutionRejection};
-use frame_support::traits::fungible::{Inspect, InspectHold};
+use crate::{Devices, Error, Id32, Models, ReplicaCount, SolutionRejection};
+use frame_support::traits::fungible::InspectHold;
 use frame_support::{assert_noop, assert_ok};
 use subspace_proof_of_residency::{
     Hash32, PorwSolution, TILE_BYTES, TileFraudProof, derive_slot_seed, merkle_proof, merkle_root,
@@ -12,6 +12,15 @@ const CHALLENGE: Id32 = [9; 32];
 const N_TILES: usize = 4;
 
 type Registry = crate::Pallet<Test>;
+
+/// Cross into the next epoch (EpochLength = 1 in the mock) and settle it.
+/// `settle_epoch` is idempotent per epoch, so a fresh block is required for
+/// each fold — this mirrors how the `on_initialize` hook settles in production.
+fn advance_and_settle() {
+    let now = System::block_number();
+    System::set_block_number(now + 1);
+    assert_ok!(Registry::settle_epoch(RuntimeOrigin::signed(1)));
+}
 
 fn model_tiles() -> Vec<[u8; TILE_BYTES]> {
     (0..(N_TILES * TILE_BYTES) as u64)
@@ -381,7 +390,7 @@ fn burning_fees_raises_weight_and_supply_drops() {
 
         // Settle: ema = (0*3 + 800)/4 = 200 ; demand weight = 200/10 = 20.
         // max(floor 50, 20) = 50 — demand still below floor.
-        assert_ok!(Registry::settle_epoch(RuntimeOrigin::signed(1)));
+        advance_and_settle();
         assert_eq!(Models::<Test>::get(id).unwrap().demand_ema, 200);
         assert_eq!(Registry::model_reward_weight(&id), 50);
 
@@ -392,7 +401,7 @@ fn burning_fees_raises_weight_and_supply_drops() {
                 id,
                 800
             ));
-            assert_ok!(Registry::settle_epoch(RuntimeOrigin::signed(1)));
+            advance_and_settle();
         }
         // EMA converges toward 800 ⇒ demand weight toward 80 > floor 50.
         assert!(Registry::model_reward_weight(&id) > 50);
@@ -415,13 +424,13 @@ fn demand_decays_back_to_floor_without_fees() {
                 id,
                 400
             ));
-            assert_ok!(Registry::settle_epoch(RuntimeOrigin::signed(1)));
+            advance_and_settle();
         }
         let hot = Registry::model_reward_weight(&id);
         assert!(hot > 5);
         // Demand stops: EMA decays each epoch toward zero, weight toward floor.
         for _ in 0..20 {
-            assert_ok!(Registry::settle_epoch(RuntimeOrigin::signed(1)));
+            advance_and_settle();
         }
         assert_eq!(Registry::model_reward_weight(&id), 5); // back to floor
     });

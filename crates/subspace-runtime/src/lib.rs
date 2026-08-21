@@ -418,6 +418,10 @@ parameter_types! {
     pub const PorwFeePerWeightUnit: Balance = 100 * AI3;
     /// Reward-weight normalization ceiling.
     pub const PorwMaxModelWeight: u32 = 1_000_000;
+    /// Blocks per demand-settlement epoch (~10 min at 1s slots). The demand
+    /// EMA folds and reward weights recompute once per epoch from the pallet's
+    /// `on_initialize` hook, bounding the per-block settlement cost.
+    pub const PorwEpochLength: BlockNumber = 600;
 }
 
 /// One lottery ticket per this many bytes of audited traffic.
@@ -436,6 +440,7 @@ impl pallet_porw_registry::Config for Runtime {
     type Attestation = pallet_porw_registry::PorwAttestation;
     type BondAmount = PorwBondAmount;
     type ActivationDelay = PorwActivationDelay;
+    type EpochLength = PorwEpochLength;
 }
 
 parameter_types! {
@@ -1479,6 +1484,10 @@ impl_runtime_apis! {
                 solution.m_t_millis,
                 PORW_TICKET_UNIT,
             ))
+        }
+
+        fn device_node_key(device_id: [u8; 32]) -> Option<[u8; 32]> {
+            PorwRegistry::device_node_key(&device_id)
         }
     }
 

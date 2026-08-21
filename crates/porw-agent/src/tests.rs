@@ -6,6 +6,8 @@ use subspace_proof_of_residency::{
 };
 
 const N_TILES: u64 = 8;
+/// One ticket per tile of audited traffic (test scale), matching the devnet.
+const TICKET_UNIT: u64 = TILE_BYTES as u64;
 
 fn model_bytes() -> Vec<u8> {
     (0..(N_TILES as usize * TILE_BYTES) as u64)
@@ -17,7 +19,7 @@ fn active_agent() -> (PorwAgent<CpuSketchBackend>, [u8; 32]) {
     let backend = CpuSketchBackend::new(model_bytes()).unwrap();
     let model_id = backend.model_root();
     let device_id = [0xD1; 32];
-    let mut agent = PorwAgent::new([0x11; 32], device_id, model_id, 1 << 30, backend);
+    let mut agent = PorwAgent::new([0x11; 32], device_id, model_id, TICKET_UNIT, backend);
     assert_eq!(agent.state(), AgentState::Unregistered);
     agent.on_registered();
     assert_eq!(agent.state(), AgentState::Registered);
@@ -38,7 +40,7 @@ fn ctx(coverage: Vec<u64>) -> SlotContext {
 fn inactive_agent_refuses_to_author() {
     let backend = CpuSketchBackend::new(model_bytes()).unwrap();
     let model_id = backend.model_root();
-    let agent = PorwAgent::new([1; 32], [2; 32], model_id, 1 << 30, backend);
+    let agent = PorwAgent::new([1; 32], [2; 32], model_id, TICKET_UNIT, backend);
     assert!(matches!(
         agent.author_slot(&ctx(vec![0, 1])),
         Err(AgentError::NotActive(AgentState::Unregistered))
@@ -100,6 +102,17 @@ fn authored_solution_is_well_formed_and_device_signed() {
 
     // Distance is the ring distance of the chosen ticket; sanity: < u64::MAX.
     assert!(distance < u64::MAX);
+}
+
+#[test]
+fn zero_ticket_slot_is_refused_not_faked() {
+    // Coverage earning zero tickets (here: no tiles ⇒ zero audited bytes) must
+    // surface as `NoTickets`, never a chunk-0 solution the chain would reject.
+    let (agent, _) = active_agent();
+    assert!(matches!(
+        agent.author_slot(&ctx(vec![])),
+        Err(AgentError::NoTickets)
+    ));
 }
 
 #[test]

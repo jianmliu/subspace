@@ -55,6 +55,12 @@ pub enum PorwSolutionError {
     OutsideSolutionRange,
     /// The block header has no (or a duplicate) PoRW pre-digest.
     MissingPreDigest,
+    /// The block header carries no PoRW seal digest.
+    MissingSeal,
+    /// The solution's device is not registered (no node key to check the seal).
+    UnknownDevice,
+    /// The block seal is not a valid device-key signature over the pre-hash.
+    BadSeal,
 }
 
 /// Bidirectional distance between the derived ticket chunk and the global
@@ -125,11 +131,14 @@ where
 
 /// Block-import entry point for PoRW blocks: extract the PoRW pre-digest from
 /// a block header, derive the slot's global challenge from its proof of time,
-/// and run the full [`verify_porw_solution`] against the parent state.
+/// run the full [`verify_porw_solution`] against the parent state, **and**
+/// verify the block seal — the device node key's signature over the block
+/// pre-hash. The seal check binds the device-signed pre-digest (which covers
+/// only the slot challenge) to this specific block body, so a valid pre-digest
+/// cannot be grafted onto a different block.
 ///
-/// This is the verification half of the P3 authorship path. Producing the
-/// pre-digest in `slot_worker` and sealing the block are the remaining P3
-/// pieces; both sides share this validation and the digest carriage.
+/// This is the verification half of the P3 authorship path; the authorship
+/// counterpart is [`claim_porw_slot`] plus [`porw_seal_digest`].
 pub fn verify_porw_block<Block, Client, RewardAddress>(
     client: &Client,
     parent_hash: Block::Hash,
@@ -156,7 +165,38 @@ where
         voter_weight,
         max_voter_weight,
     )?;
+
+    // Seal check: recompute the pre-hash (header without the trailing seal),
+    // look up the solution device's registered node key, and verify the seal.
+    let device_id = pre_digest.solution().device_id;
+    let pubkey = client
+        .runtime_api()
+        .device_node_key(parent_hash, device_id)
+        .map_err(|_| PorwSolutionError::RuntimeApi)?
+        .ok_or(PorwSolutionError::UnknownDevice)?;
+    let seal = extract_porw_seal::<Block>(header).ok_or(PorwSolutionError::MissingSeal)?;
+    let pre_hash = porw_pre_hash::<Block>(header);
+    if !verify_porw_seal(pre_hash.as_ref(), &pubkey, &seal) {
+        return Err(PorwSolutionError::BadSeal);
+    }
+
     Ok((pre_digest, distance))
+}
+
+/// The block pre-hash a PoRW seal signs: the header hash with its trailing
+/// seal digest removed (the author signs this, the importer recomputes it).
+fn porw_pre_hash<Block: BlockT>(header: &Block::Header) -> Block::Hash {
+    let mut pre = header.clone();
+    let logs = &mut pre.digest_mut().logs;
+    if matches!(logs.last().and_then(|l| l.as_porw_seal()), Some(_)) {
+        logs.pop();
+    }
+    pre.hash()
+}
+
+/// Extract the PoRW seal signature from a header's trailing digest log.
+fn extract_porw_seal<Block: BlockT>(header: &Block::Header) -> Option<[u8; 64]> {
+    header.digest().logs().last().and_then(|l| l.as_porw_seal())
 }
 
 // ---------------------------------------------------------------------------
