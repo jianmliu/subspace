@@ -632,7 +632,12 @@ stake 缩放层原样套用。
    `check_solution` 快速路径（注册/生效延迟/度量吊销/模型声明/包络）。
    attestation 经可插拔 `AttestationVerifier` trait（P4 接真实 NVIDIA
    CC/TDX/SNP 验证）。wasm 可编译，7 项 mock runtime 测试。
-3. `porw-agent`：CVM 内节点程序（Rust，度量白名单化、可复现构建）。
+3. ★ 已落地：`crates/porw-agent`——节点侧 agent(状态机
+   Unregistered→Registered→Active、solution 组装+设备签名、pluggable
+   `SketchBackend` trait GPU/CPU 可换、CPU 后端用规范 sketch)+
+   `crates/porw-devnet`——纯 CPU 端到端集成测试:agent 产签名 solution →
+   真实 attestation 证据注册 → 激活 → 链上快速路径接受 + 共识距离校验,
+   零 GPU 零 TEE 全绿。剩余:GPU `SketchBackend` 实现、接进活跃节点服务。
 4. `porw-sketch-gpu`：S1-over-coverage 定向 sweep（PoC 已有 Triton 版）
    + 可选融合加固模式。
 5. ★ 已落地：`crates/porw-attestation`——attestation 证据验证库,真实

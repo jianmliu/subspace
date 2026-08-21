@@ -1,0 +1,24 @@
+[package]
+name = "porw-devnet"
+description = "CPU-only PoRW devnet harness: drives the agent -> registry -> consensus path end to end with no GPU and no TEE"
+license = "0BSD"
+version = "0.1.0"
+authors = ["Jianming Liu <liujm06@gmail.com>"]
+edition.workspace = true
+publish = false
+
+[dependencies]
+
+[dev-dependencies]
+porw-agent.workspace = true
+porw-attestation = { workspace = true, features = ["std"] }
+subspace-proof-of-residency = { workspace = true, features = ["std"] }
+pallet-porw-registry = { workspace = true, features = ["std"] }
+frame-support = { workspace = true, features = ["std"] }
+frame-system = { workspace = true, features = ["std"] }
+pallet-balances = { workspace = true, features = ["std"] }
+sp-runtime = { workspace = true, features = ["std"] }
+sp-io = { workspace = true, features = ["std"] }
+sp-core = { workspace = true, features = ["std", "full_crypto"] }
+parity-scale-codec = { workspace = true, features = ["derive", "std"] }
+scale-info = { workspace = true, features = ["derive", "std"] }

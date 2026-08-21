@@ -9125,6 +9125,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cc9c68a3f6da06753e9335d63e27f6b9754dd1920d941135b7ea8224f141adb2"
 
 [[package]]
+name = "porw-agent"
+version = "0.1.0"
+dependencies = [
+ "parity-scale-codec",
+ "porw-attestation",
+ "sp-core",
+ "sp-io",
+ "subspace-proof-of-residency",
+ "thiserror 2.0.12",
+]
+
+[[package]]
 name = "porw-attestation"
 version = "0.1.0"
 dependencies = [
@@ -9132,6 +9144,24 @@ dependencies = [
  "scale-info",
  "sp-core",
  "sp-io",
+]
+
+[[package]]
+name = "porw-devnet"
+version = "0.1.0"
+dependencies = [
+ "frame-support",
+ "frame-system",
+ "pallet-balances",
+ "pallet-porw-registry",
+ "parity-scale-codec",
+ "porw-agent",
+ "porw-attestation",
+ "scale-info",
+ "sp-core",
+ "sp-io",
+ "sp-runtime",
+ "subspace-proof-of-residency",
 ]
 
 [[package]]

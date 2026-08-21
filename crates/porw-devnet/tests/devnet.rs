@@ -1,0 +1,165 @@
+//! End-to-end CPU devnet: a PoRW agent produces a device-signed solution, the
+//! device is registered on chain with real attestation evidence, and the
+//! on-chain fast path plus the consensus distance check accept the agent's
+//! solution — the whole authorship→acceptance loop, GPU- and TEE-free.
+
+mod mock;
+
+use mock::*;
+use pallet_porw_registry::SolutionRejection;
+use porw_agent::cpu::CpuSketchBackend;
+use porw_agent::{AgentState, PorwAgent, SlotContext, testkit};
+use sp_core::Pair;
+use subspace_proof_of_residency::TILE_BYTES;
+
+type Registry = pallet_porw_registry::Pallet<Test>;
+
+const N_TILES: usize = 16;
+const MEASUREMENT: [u8; 32] = [0xAA; 32];
+const DEVICE_ID: [u8; 32] = [0xD1; 32];
+const GLOBAL_CHALLENGE: [u8; 32] = [0x9E; 32];
+const VENDOR_ROOT_SEED: u8 = 0x55;
+
+fn model_bytes() -> Vec<u8> {
+    (0..(N_TILES * TILE_BYTES) as u64)
+        .map(|i| ((i.wrapping_mul(2654435761) >> 7) & 0xFF) as u8)
+        .collect()
+}
+
+fn build_agent() -> PorwAgent<CpuSketchBackend> {
+    let backend = CpuSketchBackend::new(model_bytes()).unwrap();
+    let model_id = backend.model_root();
+    PorwAgent::new([0x11; 32], DEVICE_ID, model_id, TICKET_UNIT, backend)
+}
+
+/// Governance + owner steps that bring a device to `Active` on chain, using
+/// attestation evidence the agent's testkit synthesizes for this node key.
+fn register_and_announce(agent: &PorwAgent<CpuSketchBackend>) {
+    let root = testkit::test_vendor_root(VENDOR_ROOT_SEED);
+    // Governance: whitelist the measurement and trust the (test) vendor root.
+    assert_ok(Registry::register_measurement(
+        RuntimeOrigin::root(),
+        MEASUREMENT,
+    ));
+    assert_ok(Registry::add_trusted_root(
+        RuntimeOrigin::root(),
+        root.public().0,
+    ));
+    assert_ok(Registry::register_model(
+        RuntimeOrigin::root(),
+        agent.model_id(),
+        (N_TILES * TILE_BYTES) as u64,
+        2,
+        1000,
+    ));
+    // Owner registers the attested device and announces the resident model.
+    let evidence = testkit::build_evidence(
+        &root,
+        0x66,
+        agent.device_id(),
+        agent.node_pubkey(),
+        MEASUREMENT,
+    );
+    assert_ok(Registry::register_device(
+        RuntimeOrigin::signed(1),
+        agent.device_id(),
+        agent.node_pubkey(),
+        1 << 40, // generous envelope
+        evidence,
+    ));
+    assert_ok(Registry::announce_model(
+        RuntimeOrigin::signed(1),
+        agent.device_id(),
+        agent.model_id(),
+    ));
+}
+
+fn assert_ok(r: sp_runtime::DispatchResult) {
+    r.expect("dispatch should succeed");
+}
+
+#[test]
+fn agent_solution_is_accepted_by_the_chain_fast_path() {
+    new_test_ext().execute_with(|| {
+        let mut agent = build_agent();
+        register_and_announce(&agent);
+        agent.on_registered();
+
+        // Author a slot with a coverage set (a MoE-ish subset of tiles).
+        let ctx = SlotContext {
+            global_challenge: GLOBAL_CHALLENGE,
+            coverage: vec![0, 3, 4, 9, 15],
+            m_t_millis: 2000,
+        };
+
+        // Before activation, the chain rejects the solution as inactive even
+        // though it is well-formed and correctly signed.
+        agent.on_activated(); // agent-side lifecycle (mirrors chain)
+        assert_eq!(agent.state(), AgentState::Active);
+        let (solution, distance) = agent.author_slot(&ctx).unwrap();
+        assert_eq!(
+            Registry::check_solution_signed(&solution, &GLOBAL_CHALLENGE),
+            Err(SolutionRejection::DeviceInactive)
+        );
+
+        // Advance past the on-chain activation delay.
+        System::set_block_number(1 + ACTIVATION_DELAY);
+
+        // The chain fast path now accepts the agent's signed solution:
+        // registered + activated device, valid device signature over the slot
+        // challenge, announced model, within the hardware envelope.
+        assert_eq!(
+            Registry::check_solution_signed(&solution, &GLOBAL_CHALLENGE),
+            Ok(())
+        );
+
+        // Consensus math: with a full-range target every solution qualifies,
+        // and the chosen ticket is within the tickets the coverage authorizes.
+        let solution_range = u64::MAX;
+        assert!(distance <= solution_range / 2);
+        let tickets = subspace_proof_of_residency::ticket_count(
+            solution.coverage_bytes,
+            solution.m_t_millis,
+            TICKET_UNIT,
+        )
+        .max(1);
+        assert!(solution.chunk_index < tickets);
+    });
+}
+
+#[test]
+fn tampered_solution_is_rejected_by_the_chain() {
+    new_test_ext().execute_with(|| {
+        let mut agent = build_agent();
+        register_and_announce(&agent);
+        agent.on_registered();
+        agent.on_activated();
+        System::set_block_number(1 + ACTIVATION_DELAY);
+
+        let ctx = SlotContext {
+            global_challenge: GLOBAL_CHALLENGE,
+            coverage: vec![0, 1, 2],
+            m_t_millis: 1000,
+        };
+        let (mut solution, _) = agent.author_slot(&ctx).unwrap();
+
+        // Tamper with the sketch after signing: the device signature no longer
+        // covers it, so the chain fast path rejects the bad signature.
+        solution.sketch ^= 0xDEAD;
+        assert_eq!(
+            Registry::check_solution_signed(&solution, &GLOBAL_CHALLENGE),
+            Err(SolutionRejection::BadSignature)
+        );
+
+        // Over-claiming the service multiplier busts the hardware envelope.
+        let (mut greedy, _) = agent.author_slot(&ctx).unwrap();
+        greedy.m_t_millis = u64::MAX / 2;
+        // Re-sign so the signature is valid and only the envelope check bites.
+        let key = sp_core::ed25519::Pair::from_seed(&[0x11; 32]);
+        greedy.signature = key.sign(&greedy.signing_payload(&GLOBAL_CHALLENGE)).0;
+        assert_eq!(
+            Registry::check_solution_signed(&greedy, &GLOBAL_CHALLENGE),
+            Err(SolutionRejection::EnvelopeExceeded)
+        );
+    });
+}

@@ -1,0 +1,19 @@
+[package]
+name = "porw-agent"
+description = "PoRW node-side agent: manages resident model weights, computes per-slot residency sketches via a pluggable backend, and assembles device-signed PoRW solutions for block authorship"
+license = "0BSD"
+version = "0.1.0"
+authors = ["Jianming Liu <liujm06@gmail.com>"]
+edition.workspace = true
+include = ["/src", "/Cargo.toml"]
+
+[lib]
+bench = false
+
+[dependencies]
+parity-scale-codec = { workspace = true, features = ["derive"] }
+sp-core = { workspace = true, features = ["std", "full_crypto"] }
+subspace-proof-of-residency = { workspace = true, features = ["std"] }
+porw-attestation = { workspace = true, features = ["std"] }
+thiserror.workspace = true
+sp-io = { workspace = true, features = ["std"] }
