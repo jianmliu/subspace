@@ -685,9 +685,12 @@ stake 缩放层原样套用。
   `verify_porw_seal`（设备节点密钥对区块 pre-hash 的封印,防 solution
   被套到别的区块体）。授权侧与导入侧现共用同一套验证与 digest 载体,
   各自单元测试齐备。
-- 余下（节点服务集成，非纯逻辑）：把 `claim_porw_slot` 接进活跃 slot
-  循环、候选 solution 由 attested `porw-agent`（尚不存在的组件，P4）
-  流式提供；副本交叉核验调度；模型治理流程；testnet。
+- ★ 已落地（`porw-devnet` 产块循环）：`claim_porw_slot` 驱动的真实
+  产块→封印→链接→`verify_porw_block` 导入循环,形成一条增长的、每块
+  device-key 封印且父子链接的区块链(mock runtime-API client 做真实
+  快速路径检查,无 substrate storage)。伪造封印被拒。CPU 全绿。
+- 余下(需真实基础设施):接进真正的 `subspace-node` 服务(PoT gadget、
+  网络、多节点);GPU `SketchBackend`;副本交叉核验调度;testnet。
 
 ### 8.3 降级路径（设计保险）
 - **无 CC 的消费卡**：不参与 PoRW 主抽签，可参与 P0 式 DRAM/显存审计放大的

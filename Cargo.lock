@@ -9157,10 +9157,16 @@ dependencies = [
  "parity-scale-codec",
  "porw-agent",
  "porw-attestation",
+ "sc-consensus-subspace",
  "scale-info",
+ "sp-api",
+ "sp-blockchain",
+ "sp-consensus-slots",
+ "sp-consensus-subspace",
  "sp-core",
  "sp-io",
  "sp-runtime",
+ "subspace-core-primitives",
  "subspace-proof-of-residency",
 ]
 
