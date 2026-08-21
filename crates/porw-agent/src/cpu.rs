@@ -55,4 +55,14 @@ impl SketchBackend for CpuSketchBackend {
             .map(|&idx| sketch_tile(slot_seed, idx, self.tile(idx)))
             .collect()
     }
+
+    fn tile_bytes(&self, idx: u64) -> Vec<u8> {
+        self.tile(idx).to_vec()
+    }
+
+    fn weights_leaves(&self) -> Vec<Hash32> {
+        (0..self.tile_count)
+            .map(|i| weights_leaf(i, self.tile(i)))
+            .collect()
+    }
 }

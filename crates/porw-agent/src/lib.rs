@@ -29,11 +29,13 @@
 use sp_core::{Pair, ed25519};
 use subspace_proof_of_residency::PorwSolution;
 
+pub mod audit;
 pub mod backend;
 pub mod cpu;
 pub mod solution;
 pub mod testkit;
 
+pub use audit::{AuditTask, CommittedTile, CrossCheckOutcome, audit_duties, cross_check};
 pub use backend::SketchBackend;
 pub use solution::{SlotContext, SolutionParams, assemble_solution};
 

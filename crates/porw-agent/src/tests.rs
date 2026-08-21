@@ -131,6 +131,95 @@ fn different_challenges_yield_different_solutions() {
 }
 
 #[test]
+fn audit_duties_cover_every_peer_deterministically() {
+    let backend = CpuSketchBackend::new(model_bytes()).unwrap();
+    let model_id = backend.model_root();
+    let beacon = subspace_proof_of_residency::audit_beacon(3, &[0x77; 32]);
+    let me = [0xD1u8; 32];
+    let peer = [0xD2u8; 32];
+    let replicas = [me, peer];
+
+    // Two replicas, fan-out k=1: each is the other's only possible auditor,
+    // so my duties are exactly the peer, never myself.
+    let duties = audit_duties(&beacon, &model_id, &me, &replicas, 1, 4, N_TILES);
+    assert_eq!(duties.len(), 1);
+    assert_eq!(duties[0].target_device, peer);
+    assert_eq!(duties[0].tiles.len(), 4);
+    assert!(duties[0].tiles.iter().all(|&t| t < N_TILES));
+    // Same beacon ⇒ same schedule (what makes it a schedule at all).
+    assert_eq!(
+        duties,
+        audit_duties(&beacon, &model_id, &me, &replicas, 1, 4, N_TILES)
+    );
+}
+
+#[test]
+fn cross_check_clears_honest_commitments_and_convicts_tampered_ones() {
+    use subspace_proof_of_residency::{FraudVerdict, verify_tile_fraud_proof};
+
+    // Target and auditor are two replicas of the same model.
+    let target_backend = CpuSketchBackend::new(model_bytes()).unwrap();
+    let auditor_backend = CpuSketchBackend::new(model_bytes()).unwrap();
+    let model_id = target_backend.model_root();
+    let target_device = [0xD2u8; 32];
+    let challenge = [0x9Eu8; 32];
+    let slot_seed = derive_slot_seed(&challenge, &target_device);
+
+    // The target commits a sparse (MoE-style) coverage set, with tile 5's
+    // value tampered — it does not really hold those bytes.
+    let coverage: [u64; 3] = [1, 5, 7];
+    let mut s_tiles: Vec<u32> = target_backend.sketch_coverage(slot_seed, &coverage);
+    s_tiles[1] ^= 0xBAD;
+    let partial_leaves: Vec<_> = coverage
+        .iter()
+        .zip(&s_tiles)
+        .map(|(&i, &s)| partials_leaf(i, s))
+        .collect();
+    let solution = subspace_proof_of_residency::PorwSolution {
+        device_id: target_device,
+        model_id,
+        sketch: s_tiles.iter().fold(0u32, |a, s| a.wrapping_add(*s)),
+        partials_root: merkle_root(&partial_leaves),
+        coverage_bytes: (coverage.len() * TILE_BYTES) as u64,
+        m_t_millis: 1000,
+        chunk_index: 0,
+        signature: [0u8; 64],
+    };
+    let opening = |pos: usize| CommittedTile {
+        tile_idx: coverage[pos],
+        claimed_s_tile: s_tiles[pos],
+        partials_index: pos as u64,
+        partials_proof: subspace_proof_of_residency::merkle_proof(&partial_leaves, pos),
+    };
+
+    // Honest tile: consistent.
+    assert_eq!(
+        cross_check(&auditor_backend, &solution, &challenge, &opening(0)),
+        CrossCheckOutcome::Consistent
+    );
+
+    // Tampered tile: the auditor produces a fraud proof that verifies as
+    // Fraud with the exact on-chain verifier — ready to submit.
+    match cross_check(&auditor_backend, &solution, &challenge, &opening(1)) {
+        CrossCheckOutcome::Fraud(proof) => {
+            assert_eq!(
+                verify_tile_fraud_proof(&solution, &challenge, &model_id, &proof),
+                FraudVerdict::Fraud
+            );
+        }
+        other => panic!("expected Fraud, got {other:?}"),
+    }
+
+    // A mangled opening proves nothing either way.
+    let mut bad = opening(0);
+    bad.partials_proof[0][0] ^= 1;
+    assert_eq!(
+        cross_check(&auditor_backend, &solution, &challenge, &bad),
+        CrossCheckOutcome::Unverifiable
+    );
+}
+
+#[test]
 fn testkit_evidence_verifies_against_registered_root() {
     // The evidence testkit builds must verify with the same crate the runtime
     // uses, binding this agent's device id and node key.

@@ -26,7 +26,7 @@ use frame_support::traits::fungible::{Inspect, InspectHold, Mutate, MutateHold};
 use frame_support::traits::tokens::Precision;
 use frame_system::pallet_prelude::*;
 use sp_runtime::SaturatedConversion;
-use sp_runtime::traits::{AtLeast32BitUnsigned, Saturating};
+use sp_runtime::traits::{AtLeast32BitUnsigned, Saturating, Zero};
 use subspace_proof_of_residency::{
     FraudVerdict, PorwSolution, TileFraudProof, check_envelope, verify_tile_fraud_proof,
 };
@@ -230,6 +230,31 @@ pub mod pallet {
     #[pallet::storage]
     pub type SettledThroughEpoch<T: Config> = StorageValue<_, u64, OptionQuery>;
 
+    /// Block rewards earned by a device during an epoch, held in escrow until
+    /// the epoch's cross-audit window closes. Keyed `(epoch, device)` so the
+    /// per-epoch release drains one bucket; a fraud clawback only ever probes
+    /// the (at most two) still-unreleased epochs for the accused device.
+    /// Nothing is minted until release, so a forfeit is simply a deletion —
+    /// the reward never enters supply.
+    #[pallet::storage]
+    pub type EscrowedRewards<T: Config> = StorageDoubleMap<
+        _,
+        Twox64Concat,
+        u64,
+        Twox64Concat,
+        Id32,
+        (T::AccountId, T::Balance),
+        OptionQuery,
+    >;
+
+    /// Cross-audit beacon for the current epoch: fixed at the epoch boundary
+    /// (so it is unknowable during the preceding commit epoch) and the sole
+    /// input, with the replica set, to the pure audit-assignment functions in
+    /// `subspace-proof-of-residency`. Directs this epoch's audits of the
+    /// previous epoch's commitments.
+    #[pallet::storage]
+    pub type AuditBeaconValue<T: Config> = StorageValue<_, Id32, OptionQuery>;
+
     #[pallet::hooks]
     impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
         /// Settle any elapsed epoch once per block. Cheap in the common case:
@@ -294,6 +319,30 @@ pub mod pallet {
             reporter: T::AccountId,
             tile_idx: u64,
         },
+        /// A block reward was placed in escrow pending the audit window.
+        RewardEscrowed {
+            device_id: Id32,
+            epoch: u64,
+            amount: T::Balance,
+        },
+        /// An escrowed reward survived its audit window and was minted.
+        RewardReleased {
+            device_id: Id32,
+            owner: T::AccountId,
+            epoch: u64,
+            amount: T::Balance,
+        },
+        /// Escrowed rewards of a fraudulent device were forfeited (never
+        /// minted — the reward simply does not enter supply).
+        RewardForfeited {
+            device_id: Id32,
+            amount: T::Balance,
+        },
+        /// The cross-audit beacon for a new epoch was fixed.
+        AuditBeaconSet {
+            epoch: u64,
+            beacon: Id32,
+        },
     }
 
     #[pallet::error]
@@ -326,6 +375,9 @@ pub mod pallet {
         FeeBurnFailed,
         /// Solution is not signed by the accused device's node key.
         BadSolutionSignature,
+        /// Device still has rewards in escrow; exit must wait out the
+        /// cross-audit window (retry after ~2 epochs).
+        EscrowPending,
     }
 
     #[pallet::call]
@@ -492,12 +544,23 @@ pub mod pallet {
         }
 
         /// Deregister an owned device and release its (stored) bond.
+        ///
+        /// Refused while the device still has rewards in escrow: exit must
+        /// wait out the cross-audit window (~2 epochs after the last authored
+        /// block), so escrowed pay cannot be walked out from under a pending
+        /// audit. (A full exit-delay on the bond itself — a pending-exit
+        /// state — is future work; today a cheat that deregisters before
+        /// being reported escapes the bond but never its unreleased pay.)
         #[pallet::call_index(4)]
         #[pallet::weight(Weight::zero())]
         pub fn deregister_device(origin: OriginFor<T>, device_id: Id32) -> DispatchResult {
             let who = ensure_signed(origin)?;
             let info = Devices::<T>::get(device_id).ok_or(Error::<T>::UnknownDevice)?;
             ensure!(info.owner == who, Error::<T>::NotOwner);
+            ensure!(
+                !Self::has_pending_escrow(&device_id),
+                Error::<T>::EscrowPending
+            );
             T::Currency::release(
                 &T::HoldReason::get(),
                 &who,
@@ -575,6 +638,10 @@ pub mod pallet {
                         frame_support::traits::tokens::Restriction::Free,
                         frame_support::traits::tokens::Fortitude::Force,
                     );
+                    // Claw back every reward still in escrow: fraud caught
+                    // within the audit window costs the cheat its pending
+                    // pay, not just its bond.
+                    Self::forfeit_escrow(&solution.device_id);
                     Self::remove_device(&solution.device_id);
                     Self::deposit_event(Event::FraudConfirmed {
                         device_id: solution.device_id,
@@ -682,6 +749,76 @@ pub mod pallet {
             ModelWeight::<T>::get(model_id)
         }
 
+        /// Escrow a block reward earned by a device this epoch instead of
+        /// paying it immediately. Entry point for the runtime's block-reward
+        /// hook when a PoRW block author is rewarded. Nothing is minted here:
+        /// the reward enters supply only when its escrow bucket is released
+        /// (audit window passed), so a fraud-triggered forfeit is a pure
+        /// deletion. No-op for an unregistered device or zero epoch length.
+        pub fn note_block_reward(device_id: Id32, amount: T::Balance) {
+            if amount.is_zero() {
+                return;
+            }
+            let Some(device) = Devices::<T>::get(device_id) else {
+                return;
+            };
+            let epoch_len = T::EpochLength::get();
+            if epoch_len.is_zero() {
+                return;
+            }
+            let now = frame_system::Pallet::<T>::block_number();
+            let epoch: u64 = (now / epoch_len).saturated_into();
+            EscrowedRewards::<T>::mutate(epoch, device_id, |entry| match entry {
+                Some((_, total)) => *total = total.saturating_add(amount),
+                None => *entry = Some((device.owner, amount)),
+            });
+            Self::deposit_event(Event::RewardEscrowed {
+                device_id,
+                epoch,
+                amount,
+            });
+        }
+
+        /// Whether the device has any reward still in escrow (same probe
+        /// range as [`Self::forfeit_escrow`]).
+        fn has_pending_escrow(device_id: &Id32) -> bool {
+            let epoch_len = T::EpochLength::get();
+            if epoch_len.is_zero() {
+                return false;
+            }
+            let now = frame_system::Pallet::<T>::block_number();
+            let current_epoch: u64 = (now / epoch_len).saturated_into();
+            (current_epoch.saturating_sub(2)..=current_epoch)
+                .any(|epoch| EscrowedRewards::<T>::contains_key(epoch, device_id))
+        }
+
+        /// Forfeit every still-escrowed reward of a device (fraud clawback).
+        /// Escrow buckets older than `current_epoch - 1` were already
+        /// released by settlement (which runs in `on_initialize`, before any
+        /// extrinsic), so probing the last three epochs covers every entry
+        /// that can exist. Forfeited rewards were never minted — they simply
+        /// never enter supply.
+        fn forfeit_escrow(device_id: &Id32) {
+            let epoch_len = T::EpochLength::get();
+            if epoch_len.is_zero() {
+                return;
+            }
+            let now = frame_system::Pallet::<T>::block_number();
+            let current_epoch: u64 = (now / epoch_len).saturated_into();
+            let mut forfeited = T::Balance::zero();
+            for epoch in current_epoch.saturating_sub(2)..=current_epoch {
+                if let Some((_, amount)) = EscrowedRewards::<T>::take(epoch, device_id) {
+                    forfeited = forfeited.saturating_add(amount);
+                }
+            }
+            if !forfeited.is_zero() {
+                Self::deposit_event(Event::RewardForfeited {
+                    device_id: *device_id,
+                    amount: forfeited,
+                });
+            }
+        }
+
         /// Registered ed25519 node public key of a device, or `None` if the
         /// device is not registered. Block import reads this to verify the
         /// block seal against the solution's device.
@@ -714,6 +851,48 @@ pub mod pallet {
                 }
             }
             let folded = Self::fold_demand_epoch();
+
+            // Fix this epoch's cross-audit beacon. Derived from the parent
+            // block hash at the boundary so it was unknowable during the
+            // commit epoch it audits (production should feed PoT-derived
+            // randomness here instead — the parent hash is grindable by the
+            // boundary-block author within its solution set).
+            let parent = frame_system::Pallet::<T>::parent_hash();
+            let mut entropy = [0u8; 32];
+            let bytes = parent.as_ref();
+            entropy[..bytes.len().min(32)].copy_from_slice(&bytes[..bytes.len().min(32)]);
+            let beacon = subspace_proof_of_residency::audit_beacon(current_epoch, &entropy);
+            AuditBeaconValue::<T>::put(beacon);
+            Self::deposit_event(Event::AuditBeaconSet {
+                epoch: current_epoch,
+                beacon,
+            });
+
+            // Release escrow whose audit window has fully passed: rewards
+            // earned in epoch e are paid at the settle of e + 2, after all of
+            // e + 1 (the audit window) produced no confirmed fraud. Nothing
+            // was minted at escrow time, so payment mints here. Iterating the
+            // live map is O(unreleased entries) — at most the last two
+            // epochs' authors, since every earlier bucket was drained by an
+            // earlier settle.
+            if let Some(release_through) = current_epoch.checked_sub(2) {
+                let due: alloc::vec::Vec<(u64, Id32, (T::AccountId, T::Balance))> =
+                    EscrowedRewards::<T>::iter()
+                        .filter(|(epoch, _, _)| *epoch <= release_through)
+                        .collect();
+                for (epoch, device_id, (owner, amount)) in due {
+                    EscrowedRewards::<T>::remove(epoch, device_id);
+                    if T::Currency::mint_into(&owner, amount).is_ok() {
+                        Self::deposit_event(Event::RewardReleased {
+                            device_id,
+                            owner,
+                            epoch,
+                            amount,
+                        });
+                    }
+                }
+            }
+
             SettledThroughEpoch::<T>::put(current_epoch);
             Some(folded)
         }

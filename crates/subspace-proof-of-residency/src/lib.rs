@@ -215,6 +215,120 @@ pub fn ticket_chunk(
 }
 
 // ---------------------------------------------------------------------------
+// Cross-audit scheduling (epoch replica cross-verification)
+// ---------------------------------------------------------------------------
+//
+// Replicas of a model are the only parties that hold its canonical bytes, so
+// only replicas can audit replicas — and any replica can audit any peer,
+// because the target's sketch seed is public (`derive_slot_seed(challenge,
+// target_device)`) and the sketch is deterministic over the shared bytes.
+//
+// The schedule is a pure function of a per-epoch beacon: every honest node
+// computes the same assignment locally, nothing is stored on chain beyond the
+// beacon itself. The beacon MUST be unknowable before the epoch starts
+// (derived from epoch-boundary randomness), otherwise a cheater could predict
+// which tiles will be sampled and keep true values ready for just those.
+//
+// Assignments only direct honest effort and bound its bandwidth; enforcement
+// stays with the permissionless fraud path (`TileFraudProof` + slashing +
+// escrow forfeiture). An auditor that finds a mismatch reports it and takes
+// the accused's bond; auditors are not paid for clean audits and need not
+// acknowledge on chain.
+
+/// Domain separator for all cross-audit derivations.
+const AUDIT_DOMAIN: &[u8] = b"porw-cross-audit-v1";
+
+/// Per-epoch audit beacon: blake3(domain || entropy || LE64 epoch).
+///
+/// `entropy` must only become known at the epoch boundary (the PoT-derived
+/// randomness of the boundary block in production; the pallet uses the parent
+/// block hash at settlement as a placeholder until PoT randomness is plumbed).
+pub fn audit_beacon(epoch: u64, entropy: &Hash32) -> Hash32 {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(AUDIT_DOMAIN);
+    hasher.update(entropy);
+    hasher.update(&epoch.to_le_bytes());
+    *hasher.finalize().as_bytes()
+}
+
+/// Rank hash ordering auditor candidates for one (model, target) pair.
+fn audit_rank(beacon: &Hash32, model_id: &Hash32, target: &Hash32, auditor: &Hash32) -> Hash32 {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(AUDIT_DOMAIN);
+    hasher.update(beacon);
+    hasher.update(model_id);
+    hasher.update(target);
+    hasher.update(auditor);
+    *hasher.finalize().as_bytes()
+}
+
+/// The up-to-`k` replica devices assigned to audit `target` this epoch:
+/// the `k` lowest rank hashes among the model's replica set, excluding the
+/// target itself. Deterministic for all observers; an empty result means the
+/// model has no peer replicas (single-replica models fall back to
+/// storage-track arbitration — that is what `min_replicas` signals).
+pub fn select_auditors(
+    beacon: &Hash32,
+    model_id: &Hash32,
+    target: &Hash32,
+    replicas: &[Hash32],
+    k: usize,
+) -> Vec<Hash32> {
+    let mut ranked: Vec<(Hash32, Hash32)> = replicas
+        .iter()
+        .filter(|device| *device != target)
+        .map(|device| (audit_rank(beacon, model_id, target, device), *device))
+        .collect();
+    ranked.sort_unstable();
+    ranked.truncate(k);
+    ranked.into_iter().map(|(_, device)| device).collect()
+}
+
+/// The `t` distinct canonical tile indices auditor `auditor` samples from
+/// `target`'s commitments this epoch, drawn from a blake3 XOF stream over
+/// (beacon, model, target, auditor). If `t >= n_tiles` every tile is audited.
+///
+/// The sample is over the model's full tile space; the auditor checks the
+/// intersection with the tiles the target actually committed (uncommitted
+/// tiles have nothing to compare against). Modulo bias over u64 draws is
+/// negligible for any real `n_tiles`.
+pub fn audit_tile_sample(
+    beacon: &Hash32,
+    model_id: &Hash32,
+    target: &Hash32,
+    auditor: &Hash32,
+    n_tiles: u64,
+    t: usize,
+) -> Vec<u64> {
+    if n_tiles == 0 {
+        return Vec::new();
+    }
+    if t as u64 >= n_tiles {
+        return (0..n_tiles).collect();
+    }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(AUDIT_DOMAIN);
+    hasher.update(b"tiles");
+    hasher.update(beacon);
+    hasher.update(model_id);
+    hasher.update(target);
+    hasher.update(auditor);
+    let mut reader = hasher.finalize_xof();
+    let mut picked = Vec::with_capacity(t);
+    let mut buf = [0u8; 8];
+    // t < n_tiles, so t distinct draws always exist; duplicates are simply
+    // redrawn from the stream.
+    while picked.len() < t {
+        reader.fill(&mut buf);
+        let idx = u64::from_le_bytes(buf) % n_tiles;
+        if !picked.contains(&idx) {
+            picked.push(idx);
+        }
+    }
+    picked
+}
+
+// ---------------------------------------------------------------------------
 // Solution and fraud proof types
 // ---------------------------------------------------------------------------
 
@@ -270,6 +384,13 @@ pub struct TileFraudProof {
     pub tile_idx: u64,
     /// Claimed per-tile sketch value (as committed by the accused).
     pub claimed_s_tile: u32,
+    /// Position of the disputed leaf in the accused's partials tree. The
+    /// partials tree is built in coverage order, so for a non-contiguous
+    /// (MoE) coverage set the leaf position differs from `tile_idx`. Purely
+    /// an opening hint: the leaf hash itself binds `tile_idx`, so a wrong
+    /// position simply fails to verify — it can never mis-attribute a value
+    /// to a different tile.
+    pub partials_index: u64,
     /// Inclusion proof of `(tile_idx, claimed_s_tile)` under `partials_root`.
     pub partials_proof: Vec<[u8; 32]>,
     /// Canonical tile bytes (retrieved from the DSN / a resident replica).
@@ -305,11 +426,14 @@ pub fn verify_tile_fraud_proof(
         return FraudVerdict::Invalid;
     }
     // 1. The claimed per-tile value must be committed under partials_root.
+    // The leaf position is the coverage-order index the reporter supplies;
+    // the leaf hash binds tile_idx, so the position cannot lie about which
+    // tile the value was committed for.
     let claimed_leaf = partials_leaf(proof.tile_idx, proof.claimed_s_tile);
     if !merkle_verify(
         &solution.partials_root,
         &claimed_leaf,
-        proof.tile_idx as usize,
+        proof.partials_index as usize,
         &proof.partials_proof,
     ) {
         return FraudVerdict::Invalid;

@@ -230,6 +230,7 @@ fn fraud_proof_slashes_bond_to_reporter() {
 
         let proof = TileFraudProof {
             tile_idx: 2,
+            partials_index: 2,
             claimed_s_tile: s_tiles[2],
             partials_proof: merkle_proof(&partial_leaves, 2),
             tile_bytes: tiles[2].to_vec(),
@@ -258,6 +259,7 @@ fn honest_solution_cannot_be_slashed() {
 
         let honest = TileFraudProof {
             tile_idx: 1,
+            partials_index: 1,
             claimed_s_tile: s_tiles[1],
             partials_proof: merkle_proof(&partial_leaves, 1),
             tile_bytes: tiles[1].to_vec(),
@@ -278,6 +280,7 @@ fn honest_solution_cannot_be_slashed() {
         bogus_tile[0] ^= 1;
         let bogus = TileFraudProof {
             tile_idx: 1,
+            partials_index: 1,
             claimed_s_tile: s_tiles[1],
             partials_proof: merkle_proof(&partial_leaves, 1),
             tile_bytes: bogus_tile.to_vec(),
@@ -304,6 +307,7 @@ fn fabricated_unsigned_solution_cannot_slash() {
 
         let proof = TileFraudProof {
             tile_idx: 2,
+            partials_index: 2,
             claimed_s_tile: s_tiles[2],
             partials_proof: merkle_proof(&partial_leaves, 2),
             tile_bytes: tiles[2].to_vec(),
@@ -453,5 +457,101 @@ fn weight_is_capped_at_max() {
         // Floor already above the cap is clamped at registration.
         tiny_model(id, u32::MAX);
         assert_eq!(Registry::model_reward_weight(&id), MaxModelWeight::get());
+    });
+}
+
+#[test]
+fn block_reward_escrows_and_releases_after_audit_window() {
+    new_test_ext().execute_with(|| {
+        setup_registered_device();
+        let supply_before = Balances::total_issuance();
+        let owner_before = Balances::free_balance(1);
+
+        // Reward earned in epoch 1 (EpochLength = 1 block in the mock):
+        // nothing is minted at escrow time.
+        crate::Pallet::<Test>::note_block_reward(DEVICE, 500);
+        assert_eq!(Balances::total_issuance(), supply_before);
+        assert_eq!(Balances::free_balance(1), owner_before);
+        assert!(crate::EscrowedRewards::<Test>::contains_key(1, DEVICE));
+
+        // Epoch 2 settles: epoch 1's audit window (epoch 2) has just opened,
+        // so the reward stays in escrow.
+        advance_and_settle();
+        assert_eq!(Balances::free_balance(1), owner_before);
+        assert!(crate::EscrowedRewards::<Test>::contains_key(1, DEVICE));
+
+        // Epoch 3 settles: epoch 2 — the audit window — passed with no
+        // confirmed fraud, so epoch 1's reward is minted to the owner.
+        advance_and_settle();
+        assert_eq!(Balances::free_balance(1), owner_before + 500);
+        assert_eq!(Balances::total_issuance(), supply_before + 500);
+        assert!(!crate::EscrowedRewards::<Test>::contains_key(1, DEVICE));
+
+        // Two rewards in one epoch accumulate into one bucket.
+        crate::Pallet::<Test>::note_block_reward(DEVICE, 100);
+        crate::Pallet::<Test>::note_block_reward(DEVICE, 200);
+        advance_and_settle();
+        advance_and_settle();
+        assert_eq!(Balances::free_balance(1), owner_before + 500 + 300);
+    });
+}
+
+#[test]
+fn fraud_within_the_audit_window_forfeits_escrowed_rewards() {
+    new_test_ext().execute_with(|| {
+        let (model_id, tiles, weight_leaves) = setup_registered_device();
+        let supply_before = Balances::total_issuance();
+        let owner_before = Balances::free_balance(1);
+
+        // The cheat earns a reward in the current epoch, then its fraudulent
+        // commitment is caught within the audit window.
+        crate::Pallet::<Test>::note_block_reward(DEVICE, 500);
+        let (solution, s_tiles, partial_leaves) = build_solution(model_id, &tiles, Some(2));
+        let proof = TileFraudProof {
+            tile_idx: 2,
+            claimed_s_tile: s_tiles[2],
+            partials_index: 2,
+            partials_proof: merkle_proof(&partial_leaves, 2),
+            tile_bytes: tiles[2].to_vec(),
+            weights_proof: merkle_proof(&weight_leaves, 2),
+        };
+        assert_ok!(Registry::report_fraud(
+            RuntimeOrigin::signed(2),
+            solution,
+            CHALLENGE,
+            proof
+        ));
+
+        // Escrow clawed back at report time; settling past the window mints
+        // nothing — the forfeited reward never enters supply.
+        assert!(!crate::EscrowedRewards::<Test>::contains_key(1, DEVICE));
+        advance_and_settle();
+        advance_and_settle();
+        assert_eq!(Balances::free_balance(1), owner_before);
+        // Supply unchanged except the bond transfer (hold → reporter's free),
+        // which does not mint.
+        assert_eq!(Balances::total_issuance(), supply_before);
+    });
+}
+
+#[test]
+fn deregistration_waits_out_the_escrow_window() {
+    new_test_ext().execute_with(|| {
+        setup_registered_device();
+        crate::Pallet::<Test>::note_block_reward(DEVICE, 500);
+
+        // Escrowed pay cannot be walked out from under a pending audit.
+        assert_noop!(
+            Registry::deregister_device(RuntimeOrigin::signed(1), DEVICE),
+            Error::<Test>::EscrowPending
+        );
+
+        // Once the window passes and the reward is released, exit is free.
+        advance_and_settle();
+        advance_and_settle();
+        assert_ok!(Registry::deregister_device(
+            RuntimeOrigin::signed(1),
+            DEVICE
+        ));
     });
 }

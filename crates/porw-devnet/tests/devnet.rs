@@ -166,3 +166,104 @@ fn tampered_solution_is_rejected_by_the_chain() {
         );
     });
 }
+
+#[test]
+fn cross_audit_catches_a_lying_replica_end_to_end() {
+    new_test_ext().execute_with(|| {
+        // The registered target device commits a coverage set with one tile's
+        // sketch value tampered (it does not really hold those bytes), signed
+        // by its real node key so the commitment is chain-valid on its face.
+        let agent = build_agent();
+        register_and_announce(&agent);
+        System::set_block_number(1 + ACTIVATION_DELAY);
+        let model_id = agent.model_id();
+        let slot_seed =
+            subspace_proof_of_residency::derive_slot_seed(&GLOBAL_CHALLENGE, &DEVICE_ID);
+
+        let target_backend = CpuSketchBackend::new(model_bytes()).unwrap();
+        let coverage: [u64; 4] = [0, 3, 9, 15];
+        let mut s_tiles =
+            porw_agent::SketchBackend::sketch_coverage(&target_backend, slot_seed, &coverage);
+        s_tiles[2] ^= 0xBAD; // tile 9 is a lie
+        let partial_leaves: Vec<_> = coverage
+            .iter()
+            .zip(&s_tiles)
+            .map(|(&i, &s)| subspace_proof_of_residency::partials_leaf(i, s))
+            .collect();
+        let mut solution = subspace_proof_of_residency::PorwSolution {
+            device_id: DEVICE_ID,
+            model_id,
+            sketch: s_tiles.iter().fold(0u32, |a, s| a.wrapping_add(*s)),
+            partials_root: subspace_proof_of_residency::merkle_root(&partial_leaves),
+            coverage_bytes: (coverage.len() * TILE_BYTES) as u64,
+            m_t_millis: 1000,
+            chunk_index: 0,
+            signature: [0u8; 64],
+        };
+        let device_key = sp_core::ed25519::Pair::from_seed(&[0x11; 32]);
+        solution.signature = device_key
+            .sign(&solution.signing_payload(&GLOBAL_CHALLENGE))
+            .0;
+        // The fast path accepts it: the lie is invisible without the bytes.
+        assert_ok(
+            Registry::check_solution_signed(&solution, &GLOBAL_CHALLENGE).map_err(|_| {
+                sp_runtime::DispatchError::Other("fast path should accept the signed commitment")
+            }),
+        );
+
+        // The target earns a block reward this epoch — held in escrow.
+        Registry::note_block_reward(DEVICE_ID, 500);
+        let owner_before = Balances::free_balance(1);
+
+        // An auditor replica (holding the same canonical bytes) draws its
+        // beacon duties, obtains the target's opening for a sampled tile,
+        // and cross-checks it against local bytes.
+        let auditor_backend = CpuSketchBackend::new(model_bytes()).unwrap();
+        let auditor_device = [0xD9u8; 32];
+        let beacon = subspace_proof_of_residency::audit_beacon(1, &[0x42; 32]);
+        let duties = porw_agent::audit_duties(
+            &beacon,
+            &model_id,
+            &auditor_device,
+            &[DEVICE_ID, auditor_device],
+            1,
+            N_TILES,
+            N_TILES as u64,
+        );
+        assert_eq!(duties[0].target_device, DEVICE_ID);
+        // Tile 9 is in the sample (t = N_TILES samples everything committed).
+        assert!(duties[0].tiles.contains(&9));
+        let opening = porw_agent::CommittedTile {
+            tile_idx: 9,
+            claimed_s_tile: s_tiles[2],
+            partials_index: 2,
+            partials_proof: subspace_proof_of_residency::merkle_proof(&partial_leaves, 2),
+        };
+        let proof =
+            match porw_agent::cross_check(&auditor_backend, &solution, &GLOBAL_CHALLENGE, &opening)
+            {
+                porw_agent::CrossCheckOutcome::Fraud(proof) => *proof,
+                other => panic!("auditor must convict the lying tile, got {other:?}"),
+            };
+
+        // The auditor submits the proof as reporter (account 2): bond moves
+        // to the reporter, the device is revoked, and the escrowed reward is
+        // forfeited — never minted.
+        let reporter_before = Balances::free_balance(2);
+        assert_ok(Registry::report_fraud(
+            RuntimeOrigin::signed(2),
+            solution,
+            GLOBAL_CHALLENGE,
+            proof,
+        ));
+        assert_eq!(Balances::free_balance(2), reporter_before + BOND);
+        assert!(pallet_porw_registry::Devices::<Test>::get(DEVICE_ID).is_none());
+        assert!(
+            !pallet_porw_registry::EscrowedRewards::<Test>::contains_key(
+                System::block_number() / 10, // EpochLength = 10 in the mock
+                DEVICE_ID
+            )
+        );
+        assert_eq!(Balances::free_balance(1), owner_before);
+    });
+}

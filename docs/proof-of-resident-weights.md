@@ -282,6 +282,68 @@ O(4KiB) + 一条路径，而非重算整个模型：
   的 piece（~MiB 级）重算并提交欺诈证明——最终裁决不依赖任何 VRAM
   副本存在，也裁决核验者本身的作恶。挑战期长度按 DSN 检索延迟定参。
 
+#### 4.6.1 副本交叉核验的 epoch 调度（已实现）
+
+交叉核验可行的根源是一条不对称性：sketch 的 slot seed 是
+`derive_slot_seed(global_challenge, device_id)`——**公开**且**逐设备**。
+逐设备保证同一模型的两个副本对同一 tile 算出不同 sketch（副本唯一性
+所需）；公开则意味着**任何持有该模型真实字节的副本，都能用目标设备的
+seed 复算其任意 tile 的承诺值**。所以「只有副本能审计副本，而任一副本
+能审计任意同模型对等设备」——调度就是给这条既有欺诈证明路径排班。
+
+**两 epoch 流水线 + 奖励托管**：
+
+```
+epoch e      提交期：正常出块，累积 partials_root 承诺
+e 边界       定信标 B_e（epoch 边界随机性）→ 全网本地推出派单
+epoch e+1    审计窗口：被指派副本复算比对 e 的承诺；不一致 ⇒ TileFraudProof
+e+2 结算     e 的区块奖励此时才从托管释放（铸造）
+```
+
+关键是**奖励托管**（`EscrowedRewards`）：epoch e 挣的区块奖励**不铸造**，
+押到 e+2 结算、审计窗口无欺诈后才 mint 给设备所有者。窗口内被证欺诈 ⇒
+托管直接删除（从未进入供给）+ bond 罚给举报人 + 吊销设备。托管未释放
+期间禁止注销设备（`EscrowPending`），堵住「带着待审计的报酬跑路」；
+bond 本身的退出延迟（pending-exit 状态机）留作后续工作。
+
+**派单是纯函数,几乎零链上状态**（`subspace-proof-of-residency`）：
+
+- `audit_beacon(epoch, entropy)`：epoch 信标。entropy 必须到 epoch 边界
+  才可知（生产取 PoT 派生随机性；pallet 目前用边界块 parent hash 占位,
+  已注明可被边界块作者在其解集内 grind,上线前须换）——否则说谎者可
+  预判被抽 tile、只对那些 tile 备好真值；
+- `select_auditors(B, model, target, replicas, k)`：对每个目标取副本集内
+  rank hash 最小的 k 个（排除自身),扇出 k≈3；
+- `audit_tile_sample(B, model, target, auditor, n_tiles, t)`：每对
+  (审计者,目标) 独立抽 t 个不重复 tile,不同审计者的样本互异,合并覆盖
+  面更宽。
+
+链上只存信标（`AuditBeaconValue`,epoch 边界随结算写入）；无派单表、
+无 ack、审计者不领干净审计的酬劳——调度只为诚实节点**划定看哪里、
+把带宽约束住**,强制力全在无许可的欺诈证明路径上（举报有赏）。
+
+**抽样量与成本**：设伪造比例 f,总抽样 N,漏检率 = (1−f)^N。
+f=1% 时 N≈690 达 99.9% 检出；每 tile 4 KiB,对 TB/s 级 HBM
+复算成本可忽略,每副本每 epoch 平均只审 k≈3 个对等设备、MB 级流量。
+真正的约束不是算力而是 **opening 可得性**：审计者需要目标承诺 tile 的
+Merkle opening（partials 树按 coverage 顺序建,故欺诈证明携带
+`partials_index` 定位叶位置——叶哈希本身绑定 tile_idx,位置说谎只会
+验证失败,不可能移花接木）。目标须在审计窗口内按请求提供 opening,
+拒供即无法自证承诺,按不可用处置——这是一个小 DA 子问题。
+
+**单副本模型**（`ReplicaCount == 1`）没有对等审计者：回退存储轨仲裁
+（下节终审路径),这正是 `min_replicas` 作为服务参数的意义。副本
+中途加入/退出时,只审计双方同在副本集期间的承诺,以 `registered_at` /
+announce 块界定。
+
+实现映射：派单纯函数与 `partials_index` 修复在
+`subspace-proof-of-residency`；托管、信标、罚没、注销门控在
+`pallet-porw-registry`（`note_block_reward` / `EscrowedRewards` /
+`AuditBeaconValue` / `forfeit_escrow`）；审计者侧
+（`audit_duties` / `cross_check`,含产出可直接提交的欺诈证明）在
+`porw-agent::audit`；端到端(说谎副本被审计员抓获→bond 罚没+托管追回)
+见 `porw-devnet` 的 `cross_audit_catches_a_lying_replica_end_to_end`。
+
 **本栈的边界（诚实重申）**：以上抓的是「驻留与覆盖造假」。`m_t` 的
 包络内虚报密码学上不可抓（§4.3 硬边界），其防线仅为 TEE 度量 +
 包络封顶 + 统计异常检测。

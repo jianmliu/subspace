@@ -186,6 +186,7 @@ fn build_solution_and_proofs(
         .map(|i| TileFraudProof {
             tile_idx: i as u64,
             claimed_s_tile: s_tiles[i],
+            partials_index: i as u64,
             partials_proof: merkle_proof(&partial_leaves, i),
             tile_bytes: tiles[i].to_vec(),
             weights_proof: merkle_proof(&weight_leaves, i),
@@ -241,4 +242,119 @@ fn fraud_proof_rejects_malformed_evidence() {
         verify_tile_fraud_proof(&solution, &challenge, &model_root, &proofs[3]),
         FraudVerdict::Invalid
     );
+}
+
+#[test]
+fn fraud_proof_works_for_non_contiguous_coverage() {
+    // MoE-style coverage: tile 3 committed at partials position 1. Before
+    // `partials_index` was added the verifier used tile_idx as the leaf
+    // position, so an honest proof against a sparse coverage set could not
+    // verify at all.
+    let challenge = [9u8; 32];
+    let device_id = [3u8; 32];
+    let slot_seed = derive_slot_seed(&challenge, &device_id);
+    let tiles = buffer_tiles(&reference_buffer());
+    let weight_leaves: Vec<Hash32> = tiles
+        .iter()
+        .enumerate()
+        .map(|(i, t)| weights_leaf(i as u64, t))
+        .collect();
+    let model_root = merkle_root(&weight_leaves);
+
+    let coverage: [u64; 2] = [1, 3];
+    let mut s_tiles: Vec<u32> = coverage
+        .iter()
+        .map(|&i| sketch_tile(slot_seed, i, &tiles[i as usize]))
+        .collect();
+    s_tiles[1] ^= 0xBAD; // tamper the value committed for tile 3
+    let partial_leaves: Vec<Hash32> = coverage
+        .iter()
+        .zip(&s_tiles)
+        .map(|(&i, &s)| partials_leaf(i, s))
+        .collect();
+    let solution = PorwSolution {
+        device_id,
+        model_id: model_root,
+        sketch: s_tiles.iter().fold(0u32, |a, s| a.wrapping_add(*s)),
+        partials_root: merkle_root(&partial_leaves),
+        coverage_bytes: (coverage.len() * TILE_BYTES) as u64,
+        m_t_millis: 1000,
+        chunk_index: 0,
+        signature: [0u8; 64],
+    };
+
+    let proof = TileFraudProof {
+        tile_idx: 3,
+        claimed_s_tile: s_tiles[1],
+        partials_index: 1, // coverage-order position, not the tile index
+        partials_proof: merkle_proof(&partial_leaves, 1),
+        tile_bytes: tiles[3].to_vec(),
+        weights_proof: merkle_proof(&weight_leaves, 3),
+    };
+    assert_eq!(
+        verify_tile_fraud_proof(&solution, &challenge, &model_root, &proof),
+        FraudVerdict::Fraud
+    );
+
+    // Lying about the position: the leaf hash binds tile_idx, so the proof
+    // simply fails to verify — it cannot shift blame across tiles.
+    let mut shifted = proof.clone();
+    shifted.partials_index = 0;
+    assert_eq!(
+        verify_tile_fraud_proof(&solution, &challenge, &model_root, &shifted),
+        FraudVerdict::Invalid
+    );
+}
+
+#[test]
+fn audit_assignment_is_deterministic_and_excludes_target() {
+    let beacon = audit_beacon(7, &[0xAB; 32]);
+    let model = [5u8; 32];
+    let replicas: Vec<Hash32> = (0u8..6).map(|i| [i; 32]).collect();
+    let target = replicas[2];
+
+    let a = select_auditors(&beacon, &model, &target, &replicas, 3);
+    let b = select_auditors(&beacon, &model, &target, &replicas, 3);
+    assert_eq!(a, b, "assignment must be a pure function of the beacon");
+    assert_eq!(a.len(), 3);
+    assert!(!a.contains(&target), "a device never audits itself");
+    // A different beacon reshuffles the panel (overwhelmingly likely).
+    let other = select_auditors(&audit_beacon(8, &[0xAB; 32]), &model, &target, &replicas, 3);
+    assert_ne!(a, other);
+    // Fewer peers than k: everyone else is assigned.
+    let small = select_auditors(&beacon, &model, &target, &replicas[2..4], 3);
+    assert_eq!(small.len(), 1, "target excluded, one peer remains");
+    // No peers at all (single-replica model): empty panel.
+    let none = select_auditors(&beacon, &model, &target, &[target], 3);
+    assert!(none.is_empty());
+}
+
+#[test]
+fn audit_tile_sample_is_deterministic_distinct_and_bounded() {
+    let beacon = audit_beacon(7, &[0xAB; 32]);
+    let (model, target, auditor) = ([5u8; 32], [2u8; 32], [1u8; 32]);
+
+    let s = audit_tile_sample(&beacon, &model, &target, &auditor, 1000, 32);
+    assert_eq!(
+        s,
+        audit_tile_sample(&beacon, &model, &target, &auditor, 1000, 32)
+    );
+    assert_eq!(s.len(), 32);
+    assert!(s.iter().all(|&i| i < 1000));
+    let mut dedup = s.clone();
+    dedup.sort_unstable();
+    dedup.dedup();
+    assert_eq!(dedup.len(), 32, "sampled tiles must be distinct");
+
+    // Different auditors of the same target sample different tiles
+    // (overwhelmingly likely), widening combined coverage.
+    let other = audit_tile_sample(&beacon, &model, &target, &[9u8; 32], 1000, 32);
+    assert_ne!(s, other);
+
+    // Requesting at least as many tiles as exist audits everything.
+    assert_eq!(
+        audit_tile_sample(&beacon, &model, &target, &auditor, 8, 32),
+        (0..8).collect::<Vec<u64>>()
+    );
+    assert!(audit_tile_sample(&beacon, &model, &target, &auditor, 0, 4).is_empty());
 }
