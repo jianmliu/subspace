@@ -635,8 +635,13 @@ stake 缩放层原样套用。
 3. `porw-agent`：CVM 内节点程序（Rust，度量白名单化、可复现构建）。
 4. `porw-sketch-gpu`：S1-over-coverage 定向 sweep（PoC 已有 Triton 版）
    + 可选融合加固模式。
-5. attestation 验证库（NVIDIA NRAS / TDX / SNP 报告解析与证书链验证），
-   实现 `pallet-porw-registry::AttestationVerifier`。
+5. ★ 已落地：`crates/porw-attestation`——attestation 证据验证库,真实
+   ed25519 签名链(厂商根 → 设备身份证书 → 报告),绑定 device_id +
+   节点密钥 + measurement,8 项测试。pallet 接入:`TrustedRoots` 治理
+   存储 + `PorwAttestation` 实现,register_device 走真实验证(runtime
+   已从 insecure stub 切换)。**剩余硬件专属部分**:NVIDIA NRAS/SPDM 与
+   TDX/SNP 的 wire format 解析(替换 `Evidence::decode`)+ 真实 NVIDIA/
+   Intel/AMD 根(替换治理测试根)——验证核心格式无关、原样复用。
 
 ## 8. 分期路线图
 

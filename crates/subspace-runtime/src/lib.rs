@@ -421,8 +421,9 @@ impl pallet_porw_registry::Config for Runtime {
     type Balance = Balance;
     type Currency = Balances;
     type HoldReason = PorwBondHoldReason;
-    // TESTNET-ONLY stub; replaced by NVIDIA CC / TDX / SNP verification (P4).
-    type Attestation = pallet_porw_registry::InsecureEvidenceAsMeasurement;
+    // Real attestation chain verification; trusted roots are governance
+    // state (add NVIDIA / Intel / AMD roots; a test root on a testnet).
+    type Attestation = pallet_porw_registry::PorwAttestation;
     type BondAmount = PorwBondAmount;
     type ActivationDelay = PorwActivationDelay;
 }

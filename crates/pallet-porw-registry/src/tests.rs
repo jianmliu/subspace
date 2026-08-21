@@ -39,6 +39,10 @@ fn setup_registered_device() -> (Id32, Vec<[u8; TILE_BYTES]>, Vec<Hash32>) {
         RuntimeOrigin::root(),
         MEASUREMENT
     ));
+    assert_ok!(Registry::add_trusted_root(
+        RuntimeOrigin::root(),
+        root_pubkey()
+    ));
     assert_ok!(Registry::register_model(
         RuntimeOrigin::root(),
         model_id,
@@ -51,7 +55,7 @@ fn setup_registered_device() -> (Id32, Vec<[u8; TILE_BYTES]>, Vec<Hash32>) {
         DEVICE,
         device_pubkey(),
         1 << 30, // 1 GiB/slot envelope
-        DEVICE.to_vec(),
+        build_evidence(DEVICE, device_pubkey()),
     ));
     assert_ok!(Registry::announce_model(
         RuntimeOrigin::signed(1),
@@ -134,29 +138,57 @@ fn register_device_holds_bond_and_activates_after_delay() {
 fn registration_requires_valid_attestation_and_whitelisted_measurement() {
     new_test_ext().execute_with(|| {
         let pk = device_pubkey();
-        // Whitelist missing: stub attestation verifies but measurement unknown.
+        let ev = build_evidence(DEVICE, pk);
+
+        // No trusted root yet: even valid evidence fails attestation.
         assert_noop!(
-            Registry::register_device(RuntimeOrigin::signed(1), DEVICE, pk, 1, DEVICE.to_vec()),
+            Registry::register_device(RuntimeOrigin::signed(1), DEVICE, pk, 1, ev.clone()),
+            Error::<Test>::AttestationInvalid
+        );
+        assert_ok!(Registry::add_trusted_root(
+            RuntimeOrigin::root(),
+            root_pubkey()
+        ));
+
+        // Root trusted, but the attested measurement is not whitelisted.
+        assert_noop!(
+            Registry::register_device(RuntimeOrigin::signed(1), DEVICE, pk, 1, ev.clone()),
             Error::<Test>::UnknownMeasurement
         );
         assert_ok!(Registry::register_measurement(
             RuntimeOrigin::root(),
             MEASUREMENT
         ));
-        // Bad evidence: attestation fails.
+
+        // Malformed evidence bytes: attestation fails.
         assert_noop!(
-            Registry::register_device(RuntimeOrigin::signed(1), DEVICE, pk, 1, vec![0; 4]),
+            Registry::register_device(RuntimeOrigin::signed(1), DEVICE, pk, 1, vec![0xFF; 4]),
             Error::<Test>::AttestationInvalid
         );
+        // Evidence bound to a different node key than the one being
+        // registered: rejected (the substitution gap).
+        let wrong_key = [0x99; 32];
+        assert_noop!(
+            Registry::register_device(
+                RuntimeOrigin::signed(1),
+                DEVICE,
+                wrong_key,
+                1,
+                build_evidence(DEVICE, pk)
+            ),
+            Error::<Test>::AttestationInvalid
+        );
+
+        // Correct evidence registers; the device id cannot be re-registered.
         assert_ok!(Registry::register_device(
             RuntimeOrigin::signed(1),
             DEVICE,
             pk,
             1,
-            DEVICE.to_vec()
+            ev.clone()
         ));
         assert_noop!(
-            Registry::register_device(RuntimeOrigin::signed(2), DEVICE, pk, 1, DEVICE.to_vec()),
+            Registry::register_device(RuntimeOrigin::signed(2), DEVICE, pk, 1, ev),
             Error::<Test>::DeviceExists
         );
     });

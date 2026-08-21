@@ -40,22 +40,36 @@ mod tests;
 /// 32-byte identifier (device id, model root `R_W`, measurement digest).
 pub type Id32 = [u8; 32];
 
-/// Pluggable attestation verifier. Production wires NVIDIA CC + TDX/SNP
-/// evidence verification (native or optimistic); tests use a stub.
+/// Pluggable attestation verifier: parse `evidence` and verify its signature
+/// chain against the governance-configured `trusted_roots`, binding
+/// `device_id` and `node_pubkey`, returning the measured agent-code digest.
+///
+/// The roots are passed in (from on-chain [`TrustedRoots`] storage) so the
+/// verifier stays stateless while the trust anchors remain governance state.
 pub trait AttestationVerifier {
-    /// Verify `evidence` for `device_id`; on success return the measured
-    /// agent-code digest (checked against the on-chain whitelist).
-    fn verify(device_id: &Id32, evidence: &[u8]) -> Option<Id32>;
+    /// Verify `evidence` and return the measured agent-code digest on success.
+    fn verify(
+        trusted_roots: &[Id32],
+        device_id: &Id32,
+        node_pubkey: &Id32,
+        evidence: &[u8],
+    ) -> Option<Id32>;
 }
 
-/// TESTNET-ONLY attestation stub: treats 32-byte evidence as the claimed
-/// measurement digest itself, verifying nothing. Real deployments implement
-/// [`AttestationVerifier`] over NVIDIA CC / TDX / SNP evidence (P4).
-pub struct InsecureEvidenceAsMeasurement;
+/// Production attestation verifier: decodes [`porw_attestation::Evidence`] and
+/// verifies the vendor-root -> device-identity -> report signature chain.
+/// The only testnet-specific part is which roots governance trusts.
+pub struct PorwAttestation;
 
-impl AttestationVerifier for InsecureEvidenceAsMeasurement {
-    fn verify(_device_id: &Id32, evidence: &[u8]) -> Option<Id32> {
-        evidence.try_into().ok()
+impl AttestationVerifier for PorwAttestation {
+    fn verify(
+        trusted_roots: &[Id32],
+        device_id: &Id32,
+        node_pubkey: &Id32,
+        evidence: &[u8],
+    ) -> Option<Id32> {
+        let evidence = porw_attestation::Evidence::decode(evidence)?;
+        porw_attestation::verify_evidence(trusted_roots, device_id, node_pubkey, &evidence).ok()
     }
 }
 
@@ -143,6 +157,11 @@ pub mod pallet {
     #[pallet::storage]
     pub type Measurements<T: Config> = StorageMap<_, Twox64Concat, Id32, (), OptionQuery>;
 
+    /// Trusted attestation vendor root public keys (governance-managed):
+    /// NVIDIA / Intel / AMD roots in production, a test key on a testnet.
+    #[pallet::storage]
+    pub type TrustedRoots<T: Config> = StorageMap<_, Twox64Concat, Id32, (), OptionQuery>;
+
     /// Registered models by `R_W` root.
     #[pallet::storage]
     pub type Models<T: Config> = StorageMap<_, Twox64Concat, Id32, ModelInfo, OptionQuery>;
@@ -174,6 +193,12 @@ pub mod pallet {
         },
         MeasurementRevoked {
             measurement: Id32,
+        },
+        TrustedRootAdded {
+            root: Id32,
+        },
+        TrustedRootRemoved {
+            root: Id32,
         },
         ModelRegistered {
             model_id: Id32,
@@ -282,7 +307,28 @@ pub mod pallet {
             Ok(())
         }
 
-        /// Register an attested device: verify evidence, check the measured
+        /// Whitelist an attestation vendor root public key. Governance only.
+        #[pallet::call_index(8)]
+        #[pallet::weight(Weight::zero())]
+        pub fn add_trusted_root(origin: OriginFor<T>, root: Id32) -> DispatchResult {
+            ensure_root(origin)?;
+            TrustedRoots::<T>::insert(root, ());
+            Self::deposit_event(Event::TrustedRootAdded { root });
+            Ok(())
+        }
+
+        /// Remove a trusted attestation vendor root. Governance only.
+        #[pallet::call_index(9)]
+        #[pallet::weight(Weight::zero())]
+        pub fn remove_trusted_root(origin: OriginFor<T>, root: Id32) -> DispatchResult {
+            ensure_root(origin)?;
+            TrustedRoots::<T>::remove(root);
+            Self::deposit_event(Event::TrustedRootRemoved { root });
+            Ok(())
+        }
+
+        /// Register an attested device: verify evidence against the trusted
+        /// roots (binding the device id and node key), check the measured
         /// agent build against the whitelist, hold the fidelity bond.
         #[pallet::call_index(3)]
         #[pallet::weight(Weight::zero())]
@@ -298,7 +344,8 @@ pub mod pallet {
                 !Devices::<T>::contains_key(device_id),
                 Error::<T>::DeviceExists
             );
-            let measurement = T::Attestation::verify(&device_id, &evidence)
+            let roots: alloc::vec::Vec<Id32> = TrustedRoots::<T>::iter_keys().collect();
+            let measurement = T::Attestation::verify(&roots, &device_id, &pubkey, &evidence)
                 .ok_or(Error::<T>::AttestationInvalid)?;
             ensure!(
                 Measurements::<T>::contains_key(measurement),

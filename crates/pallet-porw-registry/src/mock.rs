@@ -1,5 +1,5 @@
 use crate as pallet_porw_registry;
-use crate::{AttestationVerifier, Id32};
+use crate::{Id32, PorwAttestation};
 use frame_support::traits::{ConstU64, ConstU128, VariantCount};
 use frame_support::{derive_impl, parameter_types};
 use parity_scale_codec::{Decode, Encode, MaxEncodedLen};
@@ -45,13 +45,43 @@ impl VariantCount for MockHoldReason {
     const VARIANT_COUNT: u32 = 1;
 }
 
-/// Stub verifier: evidence must equal the device id; measurement is fixed.
-pub struct StubAttestation;
+/// Test attestation vendor root (the governance-trusted key on a testnet).
+pub fn attestation_root() -> sp_core::ed25519::Pair {
+    use sp_core::Pair;
+    sp_core::ed25519::Pair::from_seed(&[0x55; 32])
+}
 
-impl AttestationVerifier for StubAttestation {
-    fn verify(device_id: &Id32, evidence: &[u8]) -> Option<Id32> {
-        (evidence == device_id).then_some(MEASUREMENT)
-    }
+pub fn root_pubkey() -> Id32 {
+    use sp_core::Pair;
+    attestation_root().public().0
+}
+
+/// Build valid attestation evidence for `device_id` binding `node_pubkey` and
+/// declaring `MEASUREMENT`, signed by the test root's device-identity chain.
+pub fn build_evidence(device_id: Id32, node_pubkey: Id32) -> Vec<u8> {
+    use parity_scale_codec::Encode;
+    use porw_attestation::{AttestationReport, DeviceCert, Evidence};
+    use sp_core::Pair;
+
+    let root = attestation_root();
+    let device_identity = sp_core::ed25519::Pair::from_seed(&[0x66; 32]);
+
+    let mut cert = DeviceCert {
+        device_id,
+        device_pubkey: device_identity.public().0,
+        vendor_sig: [0; 64],
+    };
+    cert.vendor_sig = root.sign(&cert.body()).0;
+
+    let mut report = AttestationReport {
+        device_id,
+        measurement: MEASUREMENT,
+        node_pubkey,
+        report_sig: [0; 64],
+    };
+    report.report_sig = device_identity.sign(&report.body()).0;
+
+    Evidence { cert, report }.encode()
 }
 
 frame_support::construct_runtime!(
@@ -87,7 +117,7 @@ impl pallet_porw_registry::Config for Test {
     type Balance = Balance;
     type Currency = Balances;
     type HoldReason = HoldReason;
-    type Attestation = StubAttestation;
+    type Attestation = PorwAttestation;
     type BondAmount = BondAmount;
     type ActivationDelay = ConstU64<10>;
 }
