@@ -399,6 +399,8 @@ agent 付费推理 → 费用部分燃烧 + 部分给服务方
 
 ### 5.3 模型准入：质押上架 + 需求跟随权重
 
+> ★ 需求跟随权重已在 `pallet-porw-registry` 落地:每模型 `demand_ema`(费用燃烧的 EMA)+ `floor_weight`;`record_inference_fee` **真实燃烧**调用者货币后累加需求信号(刷量有真金白银成本,§5.1);`settle_epoch` 每 epoch 折算 `有效权重 = clamp(demand_ema/费用单位, floor, 上限)`;`model_reward_weight` 供奖励层读取。EMA 平滑提供 §10.1 的滞后。runtime 已接入,14 项测试。
+
 - **ModelRegistry**：`model_id → (R_W merkle root, size, version, min_replicas,
   reward_weight)`。
 - **准入三阶段**：

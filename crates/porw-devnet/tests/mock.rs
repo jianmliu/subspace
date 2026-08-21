@@ -61,6 +61,9 @@ impl pallet_porw_registry::Config for Test {
     type Balance = Balance;
     type Currency = Balances;
     type HoldReason = HoldReason;
+    type DemandEmaSmoothing = frame_support::traits::ConstU32<8>;
+    type FeePerWeightUnit = frame_support::traits::ConstU128<100>;
+    type MaxModelWeight = frame_support::traits::ConstU32<1_000_000>;
     type Attestation = pallet_porw_registry::PorwAttestation;
     type BondAmount = BondAmount;
     type ActivationDelay = ConstU64<ACTIVATION_DELAY>;

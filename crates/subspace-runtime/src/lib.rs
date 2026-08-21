@@ -411,6 +411,13 @@ parameter_types! {
     pub const PorwActivationDelay: BlockNumber = 100;
     pub const PorwBondHoldReason: HoldIdentifierWrapper =
         HoldIdentifierWrapper(HoldIdentifier::PorwBond);
+    /// Demand EMA smoothing: heavy smoothing damps the demand-feedback loop.
+    pub const PorwDemandEmaSmoothing: u32 = 8;
+    /// Burned inference fees mapping to one unit of model reward weight
+    /// (placeholder pending economic calibration).
+    pub const PorwFeePerWeightUnit: Balance = 100 * AI3;
+    /// Reward-weight normalization ceiling.
+    pub const PorwMaxModelWeight: u32 = 1_000_000;
 }
 
 /// One lottery ticket per this many bytes of audited traffic.
@@ -421,6 +428,9 @@ impl pallet_porw_registry::Config for Runtime {
     type Balance = Balance;
     type Currency = Balances;
     type HoldReason = PorwBondHoldReason;
+    type DemandEmaSmoothing = PorwDemandEmaSmoothing;
+    type FeePerWeightUnit = PorwFeePerWeightUnit;
+    type MaxModelWeight = PorwMaxModelWeight;
     // Real attestation chain verification; trusted roots are governance
     // state (add NVIDIA / Intel / AMD roots; a test root on a testnet).
     type Attestation = pallet_porw_registry::PorwAttestation;

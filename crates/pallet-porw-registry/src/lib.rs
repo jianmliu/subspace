@@ -22,9 +22,10 @@
 extern crate alloc;
 
 use frame_support::pallet_prelude::*;
-use frame_support::traits::fungible::{Inspect, InspectHold, MutateHold};
+use frame_support::traits::fungible::{Inspect, InspectHold, Mutate, MutateHold};
 use frame_support::traits::tokens::Precision;
 use frame_system::pallet_prelude::*;
+use sp_runtime::SaturatedConversion;
 use sp_runtime::traits::{AtLeast32BitUnsigned, Saturating};
 use subspace_proof_of_residency::{
     FraudVerdict, PorwSolution, TileFraudProof, check_envelope, verify_tile_fraud_proof,
@@ -81,8 +82,13 @@ pub struct ModelInfo {
     /// Replicas below which the model relies on storage-track arbitration
     /// only (service parameter, not a safety one).
     pub min_replicas: u32,
-    /// Relative reward weight (demand-following in production; static here).
-    pub reward_weight: u32,
+    /// Floor reward weight: the model keeps at least this weight regardless of
+    /// demand (whitepaper §5.6 — stops a model with a demand lull from being
+    /// evicted; paid for by the lister in the open-listing follow-on).
+    pub floor_weight: u32,
+    /// EMA of per-epoch burned inference fees for this model — the demand
+    /// signal. Updated at each epoch settlement (§6.2).
+    pub demand_ema: u128,
 }
 
 /// Registered device metadata.
@@ -134,11 +140,27 @@ pub mod pallet {
         type Balance: Parameter + AtLeast32BitUnsigned + Default + Copy + MaxEncodedLen;
 
         type Currency: Inspect<Self::AccountId, Balance = Self::Balance>
+            + Mutate<Self::AccountId, Balance = Self::Balance>
             + InspectHold<Self::AccountId, Balance = Self::Balance>
             + MutateHold<Self::AccountId, Balance = Self::Balance>;
 
         /// Hold reason for the fidelity bond.
         type HoldReason: Get<<Self::Currency as InspectHold<Self::AccountId>>::Reason>;
+
+        /// EMA smoothing factor `N` for demand: each epoch,
+        /// `ema = (ema*(N-1) + pending) / N`. Larger = smoother / more
+        /// hysteresis (§10.1), damping the demand-feedback loop (§5.6).
+        #[pallet::constant]
+        type DemandEmaSmoothing: Get<u32>;
+
+        /// Burned-fee amount that maps to one unit of reward weight. The
+        /// demand component of a model's weight is `demand_ema / this`.
+        #[pallet::constant]
+        type FeePerWeightUnit: Get<Self::Balance>;
+
+        /// Maximum effective reward weight (normalization ceiling).
+        #[pallet::constant]
+        type MaxModelWeight: Get<u32>;
 
         /// Attestation evidence verifier.
         type Attestation: AttestationVerifier;
@@ -185,6 +207,16 @@ pub mod pallet {
     #[pallet::storage]
     pub type ReplicaCount<T: Config> = StorageMap<_, Twox64Concat, Id32, u32, ValueQuery>;
 
+    /// Burned inference fees accrued to each model since the last epoch
+    /// settlement. Folded into the demand EMA by `settle_epoch`.
+    #[pallet::storage]
+    pub type PendingFees<T: Config> = StorageMap<_, Twox64Concat, Id32, u128, ValueQuery>;
+
+    /// Current effective reward weight per model: `max(floor, demand)`, capped
+    /// at `MaxModelWeight`. This is what the reward-distribution layer reads.
+    #[pallet::storage]
+    pub type ModelWeight<T: Config> = StorageMap<_, Twox64Concat, Id32, u32, ValueQuery>;
+
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
     pub enum Event<T: Config> {
@@ -199,6 +231,13 @@ pub mod pallet {
         },
         TrustedRootRemoved {
             root: Id32,
+        },
+        InferenceFeeBurned {
+            model_id: Id32,
+            amount: u128,
+        },
+        EpochSettled {
+            models: u32,
         },
         ModelRegistered {
             model_id: Id32,
@@ -251,6 +290,8 @@ pub mod pallet {
         NotFraud,
         /// Solution's claimed model is not announced by the device.
         ModelNotAnnounced,
+        /// The fee to burn could not be taken from the caller.
+        FeeBurnFailed,
         /// Solution is not signed by the accused device's node key.
         BadSolutionSignature,
     }
@@ -287,7 +328,7 @@ pub mod pallet {
             model_id: Id32,
             size_bytes: u64,
             min_replicas: u32,
-            reward_weight: u32,
+            floor_weight: u32,
         ) -> DispatchResult {
             ensure_root(origin)?;
             ensure!(
@@ -295,14 +336,18 @@ pub mod pallet {
                     && size_bytes % (subspace_proof_of_residency::TILE_BYTES as u64) == 0,
                 Error::<T>::BadModelSize
             );
+            let floor_weight = floor_weight.min(T::MaxModelWeight::get());
             Models::<T>::insert(
                 model_id,
                 ModelInfo {
                     size_bytes,
                     min_replicas,
-                    reward_weight,
+                    floor_weight,
+                    demand_ema: 0,
                 },
             );
+            // Start at the floor until demand accrues.
+            ModelWeight::<T>::insert(model_id, floor_weight);
             Self::deposit_event(Event::ModelRegistered { model_id });
             Ok(())
         }
@@ -324,6 +369,73 @@ pub mod pallet {
             ensure_root(origin)?;
             TrustedRoots::<T>::remove(root);
             Self::deposit_event(Event::TrustedRootRemoved { root });
+            Ok(())
+        }
+
+        /// Record burned inference fees for a model: the caller's `amount` is
+        /// **actually burned** (removed from supply) and accrued to the
+        /// model's demand signal. Burning is what makes demand a costly,
+        /// unfakeable signal — inflating a model's weight by self-dealing costs
+        /// real tokens (whitepaper §5.1). In production the inference fee
+        /// handler calls [`Pallet::note_inference_fee`] directly; this
+        /// extrinsic is the permissionless facilitator entry point.
+        #[pallet::call_index(10)]
+        #[pallet::weight(Weight::zero())]
+        pub fn record_inference_fee(
+            origin: OriginFor<T>,
+            model_id: Id32,
+            amount: T::Balance,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            ensure!(
+                Models::<T>::contains_key(model_id),
+                Error::<T>::UnknownModel
+            );
+            T::Currency::burn_from(
+                &who,
+                amount,
+                frame_support::traits::tokens::Preservation::Preserve,
+                Precision::Exact,
+                frame_support::traits::tokens::Fortitude::Polite,
+            )
+            .map_err(|_| Error::<T>::FeeBurnFailed)?;
+            Self::note_inference_fee(model_id, amount.saturated_into::<u128>());
+            Ok(())
+        }
+
+        /// Settle the epoch: fold each model's pending burned fees into its
+        /// demand EMA and recompute its effective reward weight
+        /// `max(floor, demand_ema / FeePerWeightUnit)` capped at
+        /// `MaxModelWeight`. Permissionless (idempotent per epoch); production
+        /// runs this from an `on_initialize` hook every epoch.
+        #[pallet::call_index(11)]
+        #[pallet::weight(Weight::zero())]
+        pub fn settle_epoch(origin: OriginFor<T>) -> DispatchResult {
+            ensure_signed(origin)?;
+            let n = u128::from(T::DemandEmaSmoothing::get().max(1));
+            let unit = T::FeePerWeightUnit::get().saturated_into::<u128>().max(1);
+            let max_weight = T::MaxModelWeight::get();
+            let mut count = 0u32;
+            let model_ids: alloc::vec::Vec<Id32> = Models::<T>::iter_keys().collect();
+            for model_id in model_ids {
+                Models::<T>::mutate(model_id, |maybe| {
+                    if let Some(info) = maybe {
+                        let pending = PendingFees::<T>::take(model_id);
+                        // ema = (ema*(n-1) + pending) / n
+                        info.demand_ema = info
+                            .demand_ema
+                            .saturating_mul(n - 1)
+                            .saturating_add(pending)
+                            / n;
+                        let demand_weight =
+                            (info.demand_ema / unit).min(u128::from(max_weight)) as u32;
+                        let effective = demand_weight.max(info.floor_weight).min(max_weight);
+                        ModelWeight::<T>::insert(model_id, effective);
+                        count += 1;
+                    }
+                });
+            }
+            Self::deposit_event(Event::EpochSettled { models: count });
             Ok(())
         }
 
@@ -542,6 +654,22 @@ pub mod pallet {
                 return Err(SolutionRejection::BadSignature);
             }
             Ok(())
+        }
+
+        /// Accrue burned inference fees to a model's demand signal. Internal
+        /// entry point for the runtime fee handler (the extrinsic wraps this
+        /// after burning). No-op for an unknown model.
+        pub fn note_inference_fee(model_id: Id32, amount: u128) {
+            if Models::<T>::contains_key(model_id) {
+                PendingFees::<T>::mutate(model_id, |p| *p = p.saturating_add(amount));
+                Self::deposit_event(Event::InferenceFeeBurned { model_id, amount });
+            }
+        }
+
+        /// Current effective reward weight of a model (what the reward-
+        /// distribution layer reads). Zero for an unknown model.
+        pub fn model_reward_weight(model_id: &Id32) -> u32 {
+            ModelWeight::<T>::get(model_id)
         }
 
         fn remove_device(device_id: &Id32) {

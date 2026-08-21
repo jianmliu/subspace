@@ -1,6 +1,6 @@
 use crate as pallet_porw_registry;
 use crate::{Id32, PorwAttestation};
-use frame_support::traits::{ConstU64, ConstU128, VariantCount};
+use frame_support::traits::{ConstU32, ConstU64, ConstU128, VariantCount};
 use frame_support::{derive_impl, parameter_types};
 use parity_scale_codec::{Decode, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
@@ -110,6 +110,8 @@ impl pallet_balances::Config for Test {
 parameter_types! {
     pub const HoldReason: MockHoldReason = MockHoldReason::PorwBond;
     pub const BondAmount: Balance = BOND;
+    pub const FeePerWeightUnit: Balance = 10;
+    pub const MaxModelWeight: u32 = 1_000_000;
 }
 
 impl pallet_porw_registry::Config for Test {
@@ -117,6 +119,9 @@ impl pallet_porw_registry::Config for Test {
     type Balance = Balance;
     type Currency = Balances;
     type HoldReason = HoldReason;
+    type DemandEmaSmoothing = ConstU32<4>;
+    type FeePerWeightUnit = FeePerWeightUnit;
+    type MaxModelWeight = MaxModelWeight;
     type Attestation = PorwAttestation;
     type BondAmount = BondAmount;
     type ActivationDelay = ConstU64<10>;
@@ -127,7 +132,7 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
         .build_storage()
         .unwrap();
     pallet_balances::GenesisConfig::<Test> {
-        balances: vec![(1, 1000), (2, 1000)],
+        balances: vec![(1, 10_000_000), (2, 10_000_000)],
     }
     .assimilate_storage(&mut storage)
     .unwrap();

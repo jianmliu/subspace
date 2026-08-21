@@ -1,6 +1,6 @@
 use crate::mock::*;
-use crate::{Devices, Error, Id32, ReplicaCount, SolutionRejection};
-use frame_support::traits::fungible::InspectHold;
+use crate::{Devices, Error, Id32, ModelWeight, Models, ReplicaCount, SolutionRejection};
+use frame_support::traits::fungible::{Inspect, InspectHold};
 use frame_support::{assert_noop, assert_ok};
 use subspace_proof_of_residency::{
     Hash32, PorwSolution, TILE_BYTES, TileFraudProof, derive_slot_seed, merkle_proof, merkle_root,
@@ -334,5 +334,115 @@ fn withdraw_model_decrements_replicas_and_gates_solutions() {
             Registry::withdraw_model(RuntimeOrigin::signed(1), DEVICE, model_id),
             Error::<Test>::ModelNotAnnounced
         );
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Tokenomics: demand-following model reward weight
+// ---------------------------------------------------------------------------
+
+fn tiny_model(id: Id32, floor: u32) {
+    assert_ok!(Registry::register_model(
+        RuntimeOrigin::root(),
+        id,
+        TILE_BYTES as u64,
+        1,
+        floor,
+    ));
+}
+
+#[test]
+fn model_starts_at_floor_weight() {
+    new_test_ext().execute_with(|| {
+        let id = [0x01; 32];
+        tiny_model(id, 50);
+        assert_eq!(Registry::model_reward_weight(&id), 50);
+    });
+}
+
+#[test]
+fn burning_fees_raises_weight_and_supply_drops() {
+    new_test_ext().execute_with(|| {
+        let id = [0x02; 32];
+        tiny_model(id, 50);
+        let supply_before = Balances::total_issuance();
+
+        // Account 1 burns 800 units of inference fees for the model.
+        // FeePerWeightUnit = 10, EMA smoothing N = 4.
+        assert_ok!(Registry::record_inference_fee(
+            RuntimeOrigin::signed(1),
+            id,
+            800
+        ));
+        // The fee is really burned (removed from supply).
+        assert_eq!(Balances::total_issuance(), supply_before - 800);
+        // Pending, not yet reflected in weight until settlement.
+        assert_eq!(Registry::model_reward_weight(&id), 50);
+
+        // Settle: ema = (0*3 + 800)/4 = 200 ; demand weight = 200/10 = 20.
+        // max(floor 50, 20) = 50 — demand still below floor.
+        assert_ok!(Registry::settle_epoch(RuntimeOrigin::signed(1)));
+        assert_eq!(Models::<Test>::get(id).unwrap().demand_ema, 200);
+        assert_eq!(Registry::model_reward_weight(&id), 50);
+
+        // Sustained demand pushes the EMA up and weight above the floor.
+        for _ in 0..6 {
+            assert_ok!(Registry::record_inference_fee(
+                RuntimeOrigin::signed(1),
+                id,
+                800
+            ));
+            assert_ok!(Registry::settle_epoch(RuntimeOrigin::signed(1)));
+        }
+        // EMA converges toward 800 ⇒ demand weight toward 80 > floor 50.
+        assert!(Registry::model_reward_weight(&id) > 50);
+        assert_eq!(
+            Registry::model_reward_weight(&id),
+            (Models::<Test>::get(id).unwrap().demand_ema / 10) as u32
+        );
+    });
+}
+
+#[test]
+fn demand_decays_back_to_floor_without_fees() {
+    new_test_ext().execute_with(|| {
+        let id = [0x03; 32];
+        tiny_model(id, 5);
+        // Build up demand.
+        for _ in 0..8 {
+            assert_ok!(Registry::record_inference_fee(
+                RuntimeOrigin::signed(1),
+                id,
+                400
+            ));
+            assert_ok!(Registry::settle_epoch(RuntimeOrigin::signed(1)));
+        }
+        let hot = Registry::model_reward_weight(&id);
+        assert!(hot > 5);
+        // Demand stops: EMA decays each epoch toward zero, weight toward floor.
+        for _ in 0..20 {
+            assert_ok!(Registry::settle_epoch(RuntimeOrigin::signed(1)));
+        }
+        assert_eq!(Registry::model_reward_weight(&id), 5); // back to floor
+    });
+}
+
+#[test]
+fn recording_fees_for_unknown_model_fails() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            Registry::record_inference_fee(RuntimeOrigin::signed(1), [0xFF; 32], 10),
+            Error::<Test>::UnknownModel
+        );
+    });
+}
+
+#[test]
+fn weight_is_capped_at_max() {
+    new_test_ext().execute_with(|| {
+        let id = [0x04; 32];
+        // Floor already above the cap is clamped at registration.
+        tiny_model(id, u32::MAX);
+        assert_eq!(Registry::model_reward_weight(&id), MaxModelWeight::get());
     });
 }
