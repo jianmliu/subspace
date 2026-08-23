@@ -28,7 +28,8 @@ use frame_system::pallet_prelude::*;
 use sp_runtime::SaturatedConversion;
 use sp_runtime::traits::{AtLeast32BitUnsigned, Saturating, Zero};
 use subspace_proof_of_residency::{
-    FraudVerdict, PorwSolution, TileFraudProof, check_envelope, verify_tile_fraud_proof,
+    FraudVerdict, OpeningResponse, PorwSolution, TILE_BYTES, TileFraudProof, check_envelope,
+    verify_opening_response, verify_tile_fraud_proof,
 };
 
 pub use pallet::*;
@@ -114,11 +115,30 @@ pub struct DeviceInfo<AccountId, Balance, BlockNumber> {
     pub registered_at: BlockNumber,
 }
 
+/// An open opening challenge against a device's signed solution: the
+/// challenger demands the Merkle opening (or non-inclusion proof) for one
+/// tile of the commitment identified by the storage key's
+/// `(partials_root, tile_idx)`.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, MaxEncodedLen, TypeInfo)]
+pub struct OpeningChallenge<AccountId, Balance, BlockNumber> {
+    /// Who posted the challenge (receives the slash if it expires).
+    pub challenger: AccountId,
+    /// Deposit held from the challenger (spam pricing).
+    pub deposit: Balance,
+    /// Block by which the device must answer.
+    pub deadline: BlockNumber,
+    /// Committed leaf count, pinned by the signed solution's
+    /// `coverage_bytes / TILE_BYTES`.
+    pub n_leaves: u64,
+}
+
 /// Why a solution failed the fast path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SolutionRejection {
     UnknownDevice,
     DeviceInactive,
+    /// Device has requested exit and no longer authors.
+    DeviceExiting,
     MeasurementRevoked,
     UnknownModel,
     ModelNotAnnounced,
@@ -180,6 +200,37 @@ pub mod pallet {
         /// from being decayed more than once per epoch. Must be non-zero.
         #[pallet::constant]
         type EpochLength: Get<BlockNumberFor<Self>>;
+
+        /// Entropy source for the cross-audit beacon, sampled at each epoch
+        /// boundary. Production wires this to the PoT-derived
+        /// `BlockRandomness` of `pallet-subspace` (unknowable before the
+        /// boundary, not grindable via transaction ordering); `None` falls
+        /// back to the parent block hash, which a boundary-block author can
+        /// grind within its solution set — acceptable only on test networks.
+        type BeaconEntropy: Get<Option<Id32>>;
+
+        /// Blocks between an exit request and the bond release becoming
+        /// possible. Keeps the bond slashable while commitments made just
+        /// before the exit request are still inside their audit window; must
+        /// therefore be at least two epochs.
+        #[pallet::constant]
+        type ExitDelay: Get<BlockNumberFor<Self>>;
+
+        /// Blocks a device has to answer an on-chain opening challenge.
+        #[pallet::constant]
+        type OpeningChallengeWindow: Get<BlockNumberFor<Self>>;
+
+        /// Deposit held from the challenger of an opening challenge. Paid to
+        /// the device owner on a valid answer (compensating the forced
+        /// response), returned to the challenger when the challenge expires
+        /// unanswered (on top of the slash). Prices challenge spam.
+        #[pallet::constant]
+        type OpeningChallengeDeposit: Get<Self::Balance>;
+
+        /// Maximum number of registered models. Bounds the per-epoch
+        /// settlement sweep (`O(models)` in `on_initialize`) by construction.
+        #[pallet::constant]
+        type MaxModels: Get<u32>;
     }
 
     /// Whitelisted agent-code measurements (governance-managed).
@@ -191,9 +242,10 @@ pub mod pallet {
     #[pallet::storage]
     pub type TrustedRoots<T: Config> = StorageMap<_, Twox64Concat, Id32, (), OptionQuery>;
 
-    /// Registered models by `R_W` root.
+    /// Registered models by `R_W` root. Counted so registration can enforce
+    /// [`Config::MaxModels`], provably bounding the settlement sweep.
     #[pallet::storage]
-    pub type Models<T: Config> = StorageMap<_, Twox64Concat, Id32, ModelInfo, OptionQuery>;
+    pub type Models<T: Config> = CountedStorageMap<_, Twox64Concat, Id32, ModelInfo, OptionQuery>;
 
     /// Registered devices.
     #[pallet::storage]
@@ -244,6 +296,31 @@ pub mod pallet {
         Twox64Concat,
         Id32,
         (T::AccountId, T::Balance),
+        OptionQuery,
+    >;
+
+    /// Devices that have requested exit: device → block of the request. An
+    /// exiting device stops authoring immediately (fast path rejects it) but
+    /// remains registered — and slashable — until
+    /// [`Call::finalize_deregistration`] after [`Config::ExitDelay`], so the
+    /// bond cannot be walked out from under commitments still in their audit
+    /// window.
+    #[pallet::storage]
+    pub type PendingExits<T: Config> =
+        StorageMap<_, Twox64Concat, Id32, BlockNumberFor<T>, OptionQuery>;
+
+    /// Open opening challenges: (device, (partials_root, tile_idx)) →
+    /// challenge. The accused must answer with a verifiable
+    /// [`OpeningResponse`] before the deadline or be treated as unavailable
+    /// (slashed like fraud). See §4.6.1 of the design document.
+    #[pallet::storage]
+    pub type OpeningChallenges<T: Config> = StorageDoubleMap<
+        _,
+        Twox64Concat,
+        Id32,
+        Twox64Concat,
+        (Id32, u64),
+        OpeningChallenge<T::AccountId, T::Balance, BlockNumberFor<T>>,
         OptionQuery,
     >;
 
@@ -343,6 +420,34 @@ pub mod pallet {
             epoch: u64,
             beacon: Id32,
         },
+        /// A device requested exit; it stops authoring immediately and can
+        /// finalize after the exit delay.
+        ExitRequested {
+            device_id: Id32,
+        },
+        /// An opening challenge was posted against a device's commitment.
+        OpeningChallenged {
+            device_id: Id32,
+            partials_root: Id32,
+            tile_idx: u64,
+            challenger: T::AccountId,
+        },
+        /// The device answered an opening challenge with a verifiable
+        /// response. `committed_value` is the opened per-tile sketch value,
+        /// or `None` for a proven non-commitment.
+        OpeningAnswered {
+            device_id: Id32,
+            partials_root: Id32,
+            tile_idx: u64,
+            committed_value: Option<u32>,
+        },
+        /// An opening challenge expired unanswered: the device is treated as
+        /// unavailable and slashed like fraud.
+        OpeningDefaulted {
+            device_id: Id32,
+            partials_root: Id32,
+            tile_idx: u64,
+        },
     }
 
     #[pallet::error]
@@ -378,6 +483,31 @@ pub mod pallet {
         /// Device still has rewards in escrow; exit must wait out the
         /// cross-audit window (retry after ~2 epochs).
         EscrowPending,
+        /// Device already has an exit pending.
+        ExitAlreadyRequested,
+        /// No exit has been requested for this device.
+        NoExitPending,
+        /// The exit delay has not yet elapsed.
+        ExitDelayNotElapsed,
+        /// The device still has an unanswered opening challenge.
+        ChallengePending,
+        /// The model cap has been reached.
+        TooManyModels,
+        /// An identical opening challenge is already open.
+        ChallengeExists,
+        /// The challenged solution commits no leaves (zero coverage) or the
+        /// coverage size is malformed.
+        BadCoverage,
+        /// The challenger's deposit could not be held.
+        DepositFailed,
+        /// No such opening challenge.
+        UnknownChallenge,
+        /// The opening response does not verify against the commitment.
+        BadOpeningResponse,
+        /// The challenge deadline has not passed yet.
+        ChallengeNotExpired,
+        /// The challenge deadline has passed; only expiry can close it now.
+        ChallengeExpired,
     }
 
     #[pallet::call]
@@ -419,6 +549,13 @@ pub mod pallet {
                 size_bytes > 0
                     && size_bytes % (subspace_proof_of_residency::TILE_BYTES as u64) == 0,
                 Error::<T>::BadModelSize
+            );
+            // The model set bounds the per-epoch settlement sweep; refuse
+            // registrations beyond the cap (re-registering an existing model
+            // updates it in place and does not grow the set).
+            ensure!(
+                Models::<T>::contains_key(model_id) || Models::<T>::count() < T::MaxModels::get(),
+                Error::<T>::TooManyModels
             );
             let floor_weight = floor_weight.min(T::MaxModelWeight::get());
             Models::<T>::insert(
@@ -543,14 +680,12 @@ pub mod pallet {
             Ok(())
         }
 
-        /// Deregister an owned device and release its (stored) bond.
-        ///
-        /// Refused while the device still has rewards in escrow: exit must
-        /// wait out the cross-audit window (~2 epochs after the last authored
-        /// block), so escrowed pay cannot be walked out from under a pending
-        /// audit. (A full exit-delay on the bond itself — a pending-exit
-        /// state — is future work; today a cheat that deregisters before
-        /// being reported escapes the bond but never its unreleased pay.)
+        /// Request exit for an owned device (step 1 of 2). The device stops
+        /// authoring immediately (fast path rejects it) but stays registered
+        /// — and slashable — until [`Call::finalize_deregistration`] after
+        /// [`Config::ExitDelay`], so a cheat cannot dodge a pending audit by
+        /// deregistering: commitments made right up to this request remain
+        /// punishable through their whole audit window.
         #[pallet::call_index(4)]
         #[pallet::weight(Weight::zero())]
         pub fn deregister_device(origin: OriginFor<T>, device_id: Id32) -> DispatchResult {
@@ -558,8 +693,39 @@ pub mod pallet {
             let info = Devices::<T>::get(device_id).ok_or(Error::<T>::UnknownDevice)?;
             ensure!(info.owner == who, Error::<T>::NotOwner);
             ensure!(
+                !PendingExits::<T>::contains_key(device_id),
+                Error::<T>::ExitAlreadyRequested
+            );
+            PendingExits::<T>::insert(device_id, frame_system::Pallet::<T>::block_number());
+            Self::deposit_event(Event::ExitRequested { device_id });
+            Ok(())
+        }
+
+        /// Finalize a requested exit (step 2 of 2): after the exit delay,
+        /// with no escrow pending and no open opening challenge, release the
+        /// bond and remove the device.
+        #[pallet::call_index(12)]
+        #[pallet::weight(Weight::zero())]
+        pub fn finalize_deregistration(origin: OriginFor<T>, device_id: Id32) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            let info = Devices::<T>::get(device_id).ok_or(Error::<T>::UnknownDevice)?;
+            ensure!(info.owner == who, Error::<T>::NotOwner);
+            let requested_at =
+                PendingExits::<T>::get(device_id).ok_or(Error::<T>::NoExitPending)?;
+            let now = frame_system::Pallet::<T>::block_number();
+            ensure!(
+                now >= requested_at.saturating_add(T::ExitDelay::get()),
+                Error::<T>::ExitDelayNotElapsed
+            );
+            ensure!(
                 !Self::has_pending_escrow(&device_id),
                 Error::<T>::EscrowPending
+            );
+            ensure!(
+                OpeningChallenges::<T>::iter_key_prefix(device_id)
+                    .next()
+                    .is_none(),
+                Error::<T>::ChallengePending
             );
             T::Currency::release(
                 &T::HoldReason::get(),
@@ -570,6 +736,164 @@ pub mod pallet {
             .map_err(|_| Error::<T>::ReleaseFailed)?;
             Self::remove_device(&device_id);
             Self::deposit_event(Event::DeviceDeregistered { device_id });
+            Ok(())
+        }
+
+        /// Post an opening challenge against a device's signed commitment:
+        /// demand the Merkle opening (or a non-inclusion proof) for
+        /// `tile_idx` under the solution's `partials_root`. The accused must
+        /// answer via [`Call::respond_opening`] within the challenge window
+        /// or be treated as unavailable (slashed like fraud via
+        /// [`Call::claim_expired_challenge`]). A deposit is held from the
+        /// challenger: paid to the device owner on a valid answer, returned
+        /// on default — pricing spam without deterring honest auditors.
+        #[pallet::call_index(13)]
+        #[pallet::weight(Weight::zero())]
+        pub fn challenge_opening(
+            origin: OriginFor<T>,
+            solution: PorwSolution,
+            global_challenge: Id32,
+            tile_idx: u64,
+        ) -> DispatchResult {
+            let challenger = ensure_signed(origin)?;
+            let device = Devices::<T>::get(solution.device_id).ok_or(Error::<T>::UnknownDevice)?;
+            // Only commitments the device actually signed can be challenged.
+            ensure!(
+                Self::verify_device_signature(&device.pubkey, &solution, &global_challenge),
+                Error::<T>::BadSolutionSignature
+            );
+            let tile_bytes = TILE_BYTES as u64;
+            ensure!(
+                solution.coverage_bytes > 0 && solution.coverage_bytes % tile_bytes == 0,
+                Error::<T>::BadCoverage
+            );
+            let n_leaves = solution.coverage_bytes / tile_bytes;
+            let key = (solution.partials_root, tile_idx);
+            ensure!(
+                !OpeningChallenges::<T>::contains_key(solution.device_id, key),
+                Error::<T>::ChallengeExists
+            );
+            let deposit = T::OpeningChallengeDeposit::get();
+            T::Currency::hold(&T::HoldReason::get(), &challenger, deposit)
+                .map_err(|_| Error::<T>::DepositFailed)?;
+            let deadline = frame_system::Pallet::<T>::block_number()
+                .saturating_add(T::OpeningChallengeWindow::get());
+            OpeningChallenges::<T>::insert(
+                solution.device_id,
+                key,
+                OpeningChallenge {
+                    challenger: challenger.clone(),
+                    deposit,
+                    deadline,
+                    n_leaves,
+                },
+            );
+            Self::deposit_event(Event::OpeningChallenged {
+                device_id: solution.device_id,
+                partials_root: solution.partials_root,
+                tile_idx,
+                challenger,
+            });
+            Ok(())
+        }
+
+        /// Answer an opening challenge with a verifiable response: either the
+        /// opening of the committed leaf, or an adjacent-leaf non-inclusion
+        /// proof (coverage is committed strictly ascending). A valid answer
+        /// closes the challenge and pays the challenger's deposit to the
+        /// device owner. An opened value is emitted on chain, so a wrong
+        /// commitment answered "honestly" hands the auditor exactly what a
+        /// fraud proof needs.
+        #[pallet::call_index(14)]
+        #[pallet::weight(Weight::zero())]
+        pub fn respond_opening(
+            origin: OriginFor<T>,
+            device_id: Id32,
+            partials_root: Id32,
+            tile_idx: u64,
+            response: OpeningResponse,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            let device = Devices::<T>::get(device_id).ok_or(Error::<T>::UnknownDevice)?;
+            ensure!(device.owner == who, Error::<T>::NotOwner);
+            let key = (partials_root, tile_idx);
+            let challenge =
+                OpeningChallenges::<T>::get(device_id, key).ok_or(Error::<T>::UnknownChallenge)?;
+            ensure!(
+                frame_system::Pallet::<T>::block_number() <= challenge.deadline,
+                Error::<T>::ChallengeExpired
+            );
+            let committed_value =
+                verify_opening_response(&partials_root, challenge.n_leaves, tile_idx, &response)
+                    .map_err(|_| Error::<T>::BadOpeningResponse)?;
+            // Valid answer: challenger's deposit compensates the forced
+            // response.
+            let _ = T::Currency::transfer_on_hold(
+                &T::HoldReason::get(),
+                &challenge.challenger,
+                &who,
+                challenge.deposit,
+                Precision::BestEffort,
+                frame_support::traits::tokens::Restriction::Free,
+                frame_support::traits::tokens::Fortitude::Force,
+            );
+            OpeningChallenges::<T>::remove(device_id, key);
+            Self::deposit_event(Event::OpeningAnswered {
+                device_id,
+                partials_root,
+                tile_idx,
+                committed_value,
+            });
+            Ok(())
+        }
+
+        /// Close an expired, unanswered opening challenge: the device could
+        /// not (or would not) substantiate its own commitment, which is
+        /// treated as unavailability at fraud grade — bond to the challenger,
+        /// escrowed rewards forfeited, device revoked, and the challenger's
+        /// deposit returned. "Found wrong" and "refused to answer" thereby
+        /// carry the same executable consequences.
+        #[pallet::call_index(15)]
+        #[pallet::weight(Weight::zero())]
+        pub fn claim_expired_challenge(
+            origin: OriginFor<T>,
+            device_id: Id32,
+            partials_root: Id32,
+            tile_idx: u64,
+        ) -> DispatchResult {
+            ensure_signed(origin)?;
+            let key = (partials_root, tile_idx);
+            let challenge =
+                OpeningChallenges::<T>::get(device_id, key).ok_or(Error::<T>::UnknownChallenge)?;
+            ensure!(
+                frame_system::Pallet::<T>::block_number() > challenge.deadline,
+                Error::<T>::ChallengeNotExpired
+            );
+            let device = Devices::<T>::get(device_id).ok_or(Error::<T>::UnknownDevice)?;
+            // Return the challenger's deposit, then slash the bond to them.
+            let _ = T::Currency::release(
+                &T::HoldReason::get(),
+                &challenge.challenger,
+                challenge.deposit,
+                Precision::BestEffort,
+            );
+            let _ = T::Currency::transfer_on_hold(
+                &T::HoldReason::get(),
+                &device.owner,
+                &challenge.challenger,
+                device.bond,
+                Precision::BestEffort,
+                frame_support::traits::tokens::Restriction::Free,
+                frame_support::traits::tokens::Fortitude::Force,
+            );
+            Self::forfeit_escrow(&device_id);
+            OpeningChallenges::<T>::remove(device_id, key);
+            Self::remove_device(&device_id);
+            Self::deposit_event(Event::OpeningDefaulted {
+                device_id,
+                partials_root,
+                tile_idx,
+            });
             Ok(())
         }
 
@@ -697,6 +1021,9 @@ pub mod pallet {
             {
                 return Err(SolutionRejection::DeviceInactive);
             }
+            if PendingExits::<T>::contains_key(solution.device_id) {
+                return Err(SolutionRejection::DeviceExiting);
+            }
             if !Measurements::<T>::contains_key(device.measurement) {
                 return Err(SolutionRejection::MeasurementRevoked);
             }
@@ -779,34 +1106,25 @@ pub mod pallet {
             });
         }
 
-        /// Whether the device has any reward still in escrow (same probe
-        /// range as [`Self::forfeit_escrow`]).
+        /// Whether the device has any reward still in escrow. Iterates the
+        /// live escrow map, which settlement keeps at ~2 epochs of authors —
+        /// robust to settlement timing (no assumption that the current
+        /// block's `on_initialize` already ran).
         fn has_pending_escrow(device_id: &Id32) -> bool {
-            let epoch_len = T::EpochLength::get();
-            if epoch_len.is_zero() {
-                return false;
-            }
-            let now = frame_system::Pallet::<T>::block_number();
-            let current_epoch: u64 = (now / epoch_len).saturated_into();
-            (current_epoch.saturating_sub(2)..=current_epoch)
-                .any(|epoch| EscrowedRewards::<T>::contains_key(epoch, device_id))
+            EscrowedRewards::<T>::iter().any(|(_, device, _)| device == *device_id)
         }
 
         /// Forfeit every still-escrowed reward of a device (fraud clawback).
-        /// Escrow buckets older than `current_epoch - 1` were already
-        /// released by settlement (which runs in `on_initialize`, before any
-        /// extrinsic), so probing the last three epochs covers every entry
-        /// that can exist. Forfeited rewards were never minted — they simply
-        /// never enter supply.
+        /// Forfeited rewards were never minted — they simply never enter
+        /// supply. Same live-map iteration bound as
+        /// [`Self::has_pending_escrow`].
         fn forfeit_escrow(device_id: &Id32) {
-            let epoch_len = T::EpochLength::get();
-            if epoch_len.is_zero() {
-                return;
-            }
-            let now = frame_system::Pallet::<T>::block_number();
-            let current_epoch: u64 = (now / epoch_len).saturated_into();
+            let epochs: alloc::vec::Vec<u64> = EscrowedRewards::<T>::iter()
+                .filter(|(_, device, _)| device == device_id)
+                .map(|(epoch, _, _)| epoch)
+                .collect();
             let mut forfeited = T::Balance::zero();
-            for epoch in current_epoch.saturating_sub(2)..=current_epoch {
+            for epoch in epochs {
                 if let Some((_, amount)) = EscrowedRewards::<T>::take(epoch, device_id) {
                     forfeited = forfeited.saturating_add(amount);
                 }
@@ -852,15 +1170,21 @@ pub mod pallet {
             }
             let folded = Self::fold_demand_epoch();
 
-            // Fix this epoch's cross-audit beacon. Derived from the parent
-            // block hash at the boundary so it was unknowable during the
-            // commit epoch it audits (production should feed PoT-derived
-            // randomness here instead — the parent hash is grindable by the
-            // boundary-block author within its solution set).
-            let parent = frame_system::Pallet::<T>::parent_hash();
-            let mut entropy = [0u8; 32];
-            let bytes = parent.as_ref();
-            entropy[..bytes.len().min(32)].copy_from_slice(&bytes[..bytes.len().min(32)]);
+            // Fix this epoch's cross-audit beacon from the configured entropy
+            // source — in production the PoT-derived `BlockRandomness` of
+            // pallet-subspace, which is unknowable before the boundary and
+            // not grindable via transaction ordering. Only when no source is
+            // wired (`None`) fall back to the parent block hash, which a
+            // boundary-block author can grind within its solution set —
+            // acceptable only on test networks.
+            let entropy = T::BeaconEntropy::get().unwrap_or_else(|| {
+                let parent = frame_system::Pallet::<T>::parent_hash();
+                let mut e = [0u8; 32];
+                let bytes = parent.as_ref();
+                let n = bytes.len().min(32);
+                e[..n].copy_from_slice(&bytes[..n]);
+                e
+            });
             let beacon = subspace_proof_of_residency::audit_beacon(current_epoch, &entropy);
             AuditBeaconValue::<T>::put(beacon);
             Self::deposit_event(Event::AuditBeaconSet {
@@ -933,6 +1257,18 @@ pub mod pallet {
             for (model_id, ()) in DeviceModels::<T>::drain_prefix(device_id) {
                 ReplicaCount::<T>::mutate(model_id, |c| *c = c.saturating_sub(1));
             }
+            // Refund the deposits of any remaining open challenges against
+            // this device: with the device gone (slashed or exited) there is
+            // nothing left to answer, and the challengers did nothing wrong.
+            for (_key, challenge) in OpeningChallenges::<T>::drain_prefix(device_id) {
+                let _ = T::Currency::release(
+                    &T::HoldReason::get(),
+                    &challenge.challenger,
+                    challenge.deposit,
+                    Precision::BestEffort,
+                );
+            }
+            PendingExits::<T>::remove(device_id);
             Devices::<T>::remove(device_id);
         }
 

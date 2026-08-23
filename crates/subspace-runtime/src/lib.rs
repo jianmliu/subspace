@@ -422,10 +422,34 @@ parameter_types! {
     /// EMA folds and reward weights recompute once per epoch from the pallet's
     /// `on_initialize` hook, bounding the per-block settlement cost.
     pub const PorwEpochLength: BlockNumber = 600;
+    /// Exit delay: at least two epochs so commitments made right before the
+    /// exit request stay slashable through their whole audit window.
+    pub const PorwExitDelay: BlockNumber = 2 * 600;
+    /// Blocks a device has to answer an on-chain opening challenge.
+    pub const PorwOpeningChallengeWindow: BlockNumber = 600;
+    /// Challenger deposit per opening challenge (spam pricing).
+    pub const PorwOpeningChallengeDeposit: Balance = 10 * AI3;
+    /// Registered-model cap: bounds the per-epoch settlement sweep.
+    pub const PorwMaxModels: u32 = 4096;
 }
 
 /// One lottery ticket per this many bytes of audited traffic.
 const PORW_TICKET_UNIT: u64 = 1 << 30;
+
+/// Cross-audit beacon entropy: the PoT-derived block randomness recorded by
+/// pallet-subspace. Unknowable before the epoch-boundary block and fixed by
+/// the slot's proof of time, so the boundary author cannot grind it via
+/// transaction ordering (its only freedom is which winning solution to use).
+pub struct PorwBeaconEntropy;
+impl Get<Option<[u8; 32]>> for PorwBeaconEntropy {
+    fn get() -> Option<[u8; 32]> {
+        pallet_subspace::BlockRandomness::<Runtime>::get().map(|randomness| {
+            let mut entropy = [0u8; 32];
+            entropy.copy_from_slice(randomness.as_ref());
+            entropy
+        })
+    }
+}
 
 impl pallet_porw_registry::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
@@ -441,6 +465,11 @@ impl pallet_porw_registry::Config for Runtime {
     type BondAmount = PorwBondAmount;
     type ActivationDelay = PorwActivationDelay;
     type EpochLength = PorwEpochLength;
+    type BeaconEntropy = PorwBeaconEntropy;
+    type ExitDelay = PorwExitDelay;
+    type OpeningChallengeWindow = PorwOpeningChallengeWindow;
+    type OpeningChallengeDeposit = PorwOpeningChallengeDeposit;
+    type MaxModels = PorwMaxModels;
 }
 
 parameter_types! {

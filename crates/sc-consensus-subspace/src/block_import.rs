@@ -503,9 +503,26 @@ where
             .ok_or(Error::SegmentCommitmentNotFound(segment_index))?;
 
         let runtime_api = self.client.runtime_api();
-        let max_voting_weight = runtime_api.max_voting_stake_weight(parent_hash)?;
-        let voter_weight =
-            runtime_api.voting_stake_weight(parent_hash, pre_digest.solution().reward_address)?;
+        // The stake-weighting methods exist from SubspaceApi v3. During
+        // historical sync (or right after a node upgrade) the parent block's
+        // runtime may be older, where calling them would fail the import.
+        // Fall back to unscaled ranges (`scale_solution_range` with
+        // max_weight == 0 returns the base range) — exactly the pre-stake
+        // rules those blocks were authored and originally verified under.
+        let subspace_api_version = runtime_api
+            .api_version::<dyn SubspaceApi<Block, PublicKey>>(parent_hash)
+            .ok()
+            .flatten()
+            .unwrap_or(1);
+        let (voter_weight, max_voting_weight) = if subspace_api_version >= 3 {
+            (
+                runtime_api
+                    .voting_stake_weight(parent_hash, pre_digest.solution().reward_address)?,
+                runtime_api.max_voting_stake_weight(parent_hash)?,
+            )
+        } else {
+            (0, 0)
+        };
         let scaled_solution_range = scale_solution_range(
             subspace_digest_items.solution_range,
             voter_weight,

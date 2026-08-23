@@ -386,7 +386,19 @@ where
             extract_solution_ranges_for_block(self.client.as_ref(), parent_hash).ok()?;
 
         let maybe_root_plot_public_key = runtime_api.root_plot_public_key(parent_hash).ok()?;
-        let max_voting_weight = runtime_api.max_voting_stake_weight(parent_hash).ok()?;
+        // Stake-weighting methods exist from SubspaceApi v3; against an older
+        // parent runtime (mid-upgrade), author under the unscaled pre-stake
+        // rules (max_weight == 0 disables scaling) instead of failing.
+        let subspace_api_version = runtime_api
+            .api_version::<dyn SubspaceApi<Block, PublicKey>>(parent_hash)
+            .ok()
+            .flatten()
+            .unwrap_or(1);
+        let max_voting_weight = if subspace_api_version >= 3 {
+            runtime_api.max_voting_stake_weight(parent_hash).ok()?
+        } else {
+            0
+        };
 
         let parent_pot_parameters = runtime_api.pot_parameters(parent_hash).ok()?;
         let parent_future_slot = if parent_header.number().is_zero() {
@@ -537,9 +549,13 @@ where
                 }
             };
 
-            let voter_weight = runtime_api
-                .voting_stake_weight(parent_hash, solution.reward_address)
-                .ok()?;
+            let voter_weight = if subspace_api_version >= 3 {
+                runtime_api
+                    .voting_stake_weight(parent_hash, solution.reward_address)
+                    .ok()?
+            } else {
+                0
+            };
             let scaled_solution_range =
                 scale_solution_range(solution_range, voter_weight, max_voting_weight);
             let scaled_voting_solution_range =

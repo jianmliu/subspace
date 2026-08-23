@@ -305,16 +305,22 @@ e+2 结算     e 的区块奖励此时才从托管释放（铸造）
 
 关键是**奖励托管**（`EscrowedRewards`）：epoch e 挣的区块奖励**不铸造**，
 押到 e+2 结算、审计窗口无欺诈后才 mint 给设备所有者。窗口内被证欺诈 ⇒
-托管直接删除（从未进入供给）+ bond 罚给举报人 + 吊销设备。托管未释放
-期间禁止注销设备（`EscrowPending`），堵住「带着待审计的报酬跑路」；
-bond 本身的退出延迟（pending-exit 状态机）留作后续工作。
+托管直接删除（从未进入供给）+ bond 罚给举报人 + 吊销设备。
+
+**退出是两阶段状态机**（`PendingExits`）：`deregister_device` 只是请求
+退出——设备立即停止出块（快速路径拒绝 `DeviceExiting`）但仍在注册表中、
+bond 仍可罚没；`ExitDelay`（≥2 epoch）后经 `finalize_deregistration`
+才释放 bond,且要求托管已清、无未决 opening 挑战。作弊者无法靠抢先
+注销躲过临退出前承诺的审计窗口——bond 与托管的退出漏洞同时关闭。
 
 **派单是纯函数,几乎零链上状态**（`subspace-proof-of-residency`）：
 
 - `audit_beacon(epoch, entropy)`：epoch 信标。entropy 必须到 epoch 边界
-  才可知（生产取 PoT 派生随机性；pallet 目前用边界块 parent hash 占位,
-  已注明可被边界块作者在其解集内 grind,上线前须换）——否则说谎者可
-  预判被抽 tile、只对那些 tile 备好真值；
+  才可知——否则说谎者可预判被抽 tile、只对那些 tile 备好真值。pallet
+  经 `BeaconEntropy` provider 取熵：生产 runtime 接 pallet-subspace 的
+  **PoT 派生 `BlockRandomness`**（由 slot 的 proof-of-time 固定,边界块
+  作者无法靠交易排序 grind,唯一自由度是选用哪个中签 solution）;
+  provider 缺席时回退 parent hash（可被 grind,仅限测试网）；
 - `select_auditors(B, model, target, replicas, k)`：对每个目标取副本集内
   rank hash 最小的 k 个（排除自身),扇出 k≈3；
 - `audit_tile_sample(B, model, target, auditor, n_tiles, t)`：每对
@@ -331,8 +337,18 @@ f=1% 时 N≈690 达 99.9% 检出；每 tile 4 KiB,对 TB/s 级 HBM
 真正的约束不是算力而是 **opening 可得性**：审计者需要目标承诺 tile 的
 Merkle opening（partials 树按 coverage 顺序建,故欺诈证明携带
 `partials_index` 定位叶位置——叶哈希本身绑定 tile_idx,位置说谎只会
-验证失败,不可能移花接木）。目标须在审计窗口内按请求提供 opening,
-拒供即无法自证承诺,按不可用处置——这是一个小 DA 子问题。
+验证失败,不可能移花接木）。
+
+**拒供有链上状态机**,「发现错误」与「拒绝响应」是同等可执行的证据：
+被链下拒供的审计者提交 `challenge_opening`（押小额押金,防刷）,目标须
+在 `OpeningChallengeWindow` 内用 `respond_opening` 给出可验证应答——
+要么该 tile 的 opening（值错则审计者恰好拿到欺诈证明所需的一切）,
+要么**不包含证明**：协议要求覆盖集按 tile 序严格升序承诺（agent 端强制,
+`CoverageUnsorted`）,叶数由签名的 `coverage_bytes` 钉死,于是「未承诺
+某 tile」可用相邻两承诺叶夹逼证明（`verify_opening_response`,含首尾
+边界情形）。有效应答没收挑战者押金归目标（补偿被迫上链应答）;超时未答
+则任何人可 `claim_expired_challenge`——按欺诈同级处置：bond 罚给挑战者、
+托管奖励罚没、设备吊销,挑战者押金退还。
 
 **单副本模型**（`ReplicaCount == 1`）没有对等审计者：回退存储轨仲裁
 （下节终审路径),这正是 `min_replicas` 作为服务参数的意义。副本

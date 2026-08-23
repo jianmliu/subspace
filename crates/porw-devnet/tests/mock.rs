@@ -71,6 +71,20 @@ impl pallet_porw_registry::Config for Test {
     type BondAmount = BondAmount;
     type ActivationDelay = ConstU64<ACTIVATION_DELAY>;
     type EpochLength = ConstU64<10>;
+    type BeaconEntropy = DevnetBeaconEntropy;
+    type ExitDelay = ConstU64<20>;
+    type OpeningChallengeWindow = ConstU64<10>;
+    type OpeningChallengeDeposit = ConstU128<7>;
+    type MaxModels = frame_support::traits::ConstU32<16>;
+}
+
+/// Deterministic beacon entropy for the devnet (stands in for PoT
+/// randomness).
+pub struct DevnetBeaconEntropy;
+impl frame_support::traits::Get<Option<[u8; 32]>> for DevnetBeaconEntropy {
+    fn get() -> Option<[u8; 32]> {
+        Some([0xEE; 32])
+    }
 }
 
 pub fn new_test_ext() -> sp_io::TestExternalities {

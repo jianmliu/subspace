@@ -463,5 +463,137 @@ pub fn verify_tile_fraud_proof(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Opening-availability responses (data-availability challenges)
+// ---------------------------------------------------------------------------
+//
+// An auditor that is refused a Merkle opening can escalate on chain: it posts
+// an opening challenge naming a signed solution and a tile, and the accused
+// must answer within a window. The answer is one of two verifiable claims
+// against the solution's `partials_root`:
+//
+// - the tile WAS committed → its opening (which the auditor then cross-checks,
+//   and can turn into a `TileFraudProof` if the value is wrong); or
+// - the tile was NOT committed → a non-inclusion proof: the pair of adjacent
+//   committed leaves that bracket the challenged tile index.
+//
+// Non-inclusion is provable because the protocol requires coverage sets to be
+// committed in STRICTLY ASCENDING tile order (the agent enforces this at
+// authoring), and the leaf count is pinned by the solution's signed
+// `coverage_bytes` (= leaves × TILE_BYTES). "Found wrong" and "refused to
+// answer" thereby carry equally actionable evidence: the first becomes a
+// fraud proof, the second an expired challenge — both slashable.
+
+/// One committed leaf presented as evidence: its tile index, committed sketch
+/// value, position in the partials tree, and inclusion proof.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, TypeInfo)]
+pub struct LeafWitness {
+    /// Canonical tile index bound into the leaf hash.
+    pub tile_idx: u64,
+    /// Committed per-tile sketch value.
+    pub s_tile: u32,
+    /// Leaf position in the partials tree (coverage order).
+    pub index: u64,
+    /// Merkle inclusion proof under `partials_root`.
+    pub proof: Vec<Hash32>,
+}
+
+impl LeafWitness {
+    fn verify(&self, partials_root: &Hash32, n_leaves: u64) -> bool {
+        self.index < n_leaves
+            && merkle_verify(
+                partials_root,
+                &partials_leaf(self.tile_idx, self.s_tile),
+                self.index as usize,
+                &self.proof,
+            )
+    }
+}
+
+/// The accused's answer to an opening challenge.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, TypeInfo)]
+pub enum OpeningResponse {
+    /// The challenged tile was committed: here is its opening.
+    Committed(LeafWitness),
+    /// The challenged tile was not committed: the adjacent committed leaves
+    /// bracketing it (coverage is strictly ascending). `left`/`right` may be
+    /// absent only at the respective boundary of the tree.
+    NotCommitted {
+        /// Greatest committed leaf below the challenged tile (`None` iff the
+        /// challenged tile precedes the whole coverage set).
+        left: Option<LeafWitness>,
+        /// Smallest committed leaf above the challenged tile (`None` iff the
+        /// challenged tile follows the whole coverage set).
+        right: Option<LeafWitness>,
+    },
+}
+
+/// Verify an [`OpeningResponse`] against a solution's commitments.
+///
+/// `n_leaves` is the number of committed leaves, pinned by the signed
+/// solution: `coverage_bytes / TILE_BYTES`. Returns the opening's committed
+/// value when the response proves the tile was committed (`Some(s_tile)`),
+/// `None` when it validly proves non-commitment. `Err(())` = the response
+/// does not verify (equivalent to no answer).
+pub fn verify_opening_response(
+    partials_root: &Hash32,
+    n_leaves: u64,
+    challenged_tile: u64,
+    response: &OpeningResponse,
+) -> Result<Option<u32>, ()> {
+    match response {
+        OpeningResponse::Committed(leaf) => {
+            if leaf.tile_idx == challenged_tile && leaf.verify(partials_root, n_leaves) {
+                Ok(Some(leaf.s_tile))
+            } else {
+                Err(())
+            }
+        }
+        OpeningResponse::NotCommitted { left, right } => {
+            match (left, right) {
+                // Bracketed by two adjacent committed leaves.
+                (Some(l), Some(r)) => {
+                    let adjacent = l.index + 1 == r.index;
+                    let brackets = l.tile_idx < challenged_tile && challenged_tile < r.tile_idx;
+                    if adjacent
+                        && brackets
+                        && l.verify(partials_root, n_leaves)
+                        && r.verify(partials_root, n_leaves)
+                    {
+                        Ok(None)
+                    } else {
+                        Err(())
+                    }
+                }
+                // Beyond the last committed leaf.
+                (Some(l), None) => {
+                    if l.index + 1 == n_leaves
+                        && l.tile_idx < challenged_tile
+                        && l.verify(partials_root, n_leaves)
+                    {
+                        Ok(None)
+                    } else {
+                        Err(())
+                    }
+                }
+                // Before the first committed leaf.
+                (None, Some(r)) => {
+                    if r.index == 0
+                        && challenged_tile < r.tile_idx
+                        && r.verify(partials_root, n_leaves)
+                    {
+                        Ok(None)
+                    } else {
+                        Err(())
+                    }
+                }
+                // An empty coverage set never authors a solution (zero
+                // tickets), so "no leaves at all" is not a valid answer.
+                (None, None) => Err(()),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;

@@ -244,3 +244,18 @@ fn testkit_evidence_verifies_against_registered_root() {
         Ok(measurement)
     );
 }
+
+#[test]
+fn unsorted_coverage_is_refused() {
+    // Strictly ascending coverage is a protocol invariant: it is what makes
+    // non-commitment provable when answering an opening challenge.
+    let (agent, _) = active_agent();
+    assert!(matches!(
+        agent.author_slot(&ctx(vec![3, 1])),
+        Err(AgentError::CoverageUnsorted)
+    ));
+    assert!(matches!(
+        agent.author_slot(&ctx(vec![1, 1])), // duplicates are not ascending
+        Err(AgentError::CoverageUnsorted)
+    ));
+}

@@ -388,21 +388,29 @@ epoch e are **not minted**; they are held until the settle at e+2, after
 the audit window passed without fraud, and only then minted to the device
 owner. Fraud proven within the window ⇒ the escrow entry is simply deleted
 (it never entered supply) + the bond goes to the reporter + the device is
-revoked. Deregistration is refused while escrow is pending
-(`EscrowPending`), closing the "walk away with pay still under audit"
-exit; an exit delay on the bond itself (a pending-exit state machine)
-remains future work.
+revoked.
+
+**Exit is a two-step state machine** (`PendingExits`):
+`deregister_device` only requests exit — the device stops authoring
+immediately (fast path rejects `DeviceExiting`) but stays registered and
+slashable; only after `ExitDelay` (≥ 2 epochs) does
+`finalize_deregistration` release the bond, and it additionally requires
+the escrow to be clear and no opening challenge to be open. A cheat
+cannot dodge the audit window of its just-made commitments by racing to
+deregister — the bond-side and escrow-side exit loopholes close together.
 
 **Assignment is a pure function, with near-zero on-chain state**
 (`subspace-proof-of-residency`):
 
 - `audit_beacon(epoch, entropy)`: the epoch beacon. The entropy must be
-  unknowable before the epoch boundary (production: PoT-derived
-  randomness; the pallet currently uses the boundary block's parent hash
-  as a placeholder, documented as grindable by the boundary-block author
-  within its solution set and to be replaced before launch) — otherwise a
-  liar could predict the sampled tiles and keep true values ready for
-  just those;
+  unknowable before the epoch boundary — otherwise a liar could predict
+  the sampled tiles and keep true values ready for just those. The pallet
+  takes entropy through a `BeaconEntropy` provider: the production
+  runtime wires it to pallet-subspace's **PoT-derived `BlockRandomness`**
+  (fixed by the slot's proof of time, so the boundary author cannot grind
+  it via transaction ordering — its only freedom is which winning
+  solution to use); with no provider it falls back to the parent hash
+  (grindable; test networks only);
 - `select_auditors(B, model, target, replicas, k)`: for each target, take
   the k lowest rank-hashes within the replica set (excluding the target
   itself); fan-out k ≈ 3;
@@ -425,10 +433,24 @@ auditor needs the target's Merkle opening for a committed tile (the
 partials tree is built in coverage order, so the fraud proof carries
 `partials_index` to locate the leaf — the leaf hash itself binds
 `tile_idx`, so lying about the position merely fails verification and can
-never shift blame across tiles). The target must serve openings on
-request within the audit window; refusal means it cannot substantiate its
-own commitment and is treated as unavailability — a small
-data-availability sub-problem.
+never shift blame across tiles).
+
+**Refusal has an on-chain state machine** — "found wrong" and "refused to
+answer" are equally executable evidence. An auditor refused off-chain
+posts `challenge_opening` (with a small deposit, pricing spam); the
+target must answer within `OpeningChallengeWindow` via `respond_opening`
+with a verifiable response — either the tile's opening (a wrong value
+hands the auditor exactly what a fraud proof needs), or a
+**non-inclusion proof**: the protocol requires coverage committed in
+strictly ascending tile order (agent-enforced, `CoverageUnsorted`) and
+the leaf count is pinned by the signed `coverage_bytes`, so "this tile
+was never committed" is provable by the adjacent pair of committed
+leaves bracketing it (`verify_opening_response`, including the
+first/last boundary cases). A valid answer forfeits the challenger's
+deposit to the target (compensating the forced on-chain response); an
+unanswered deadline lets anyone `claim_expired_challenge` — treated at
+fraud grade: bond to the challenger, escrowed rewards forfeited, device
+revoked, and the challenger's deposit returned.
 
 **Single-replica models** (`ReplicaCount == 1`) have no peer auditors:
 they fall back to storage-track arbitration (the final-arbitration path

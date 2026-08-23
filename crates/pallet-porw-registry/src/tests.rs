@@ -204,14 +204,41 @@ fn registration_requires_valid_attestation_and_whitelisted_measurement() {
 }
 
 #[test]
-fn deregistration_releases_bond() {
+fn deregistration_is_two_step_with_exit_delay() {
     new_test_ext().execute_with(|| {
-        let (model_id, ..) = setup_registered_device();
+        let (model_id, tiles, _) = setup_registered_device();
+        System::set_block_number(11); // past activation delay
+        let (solution, ..) = build_solution(model_id, &tiles, None);
+        assert_ok!(Registry::check_solution(&solution));
+
         assert_noop!(
             Registry::deregister_device(RuntimeOrigin::signed(2), DEVICE),
             Error::<Test>::NotOwner
         );
+
+        // Step 1: request exit. Authoring stops immediately, but the device
+        // stays registered — and its bond stays held and slashable.
         assert_ok!(Registry::deregister_device(
+            RuntimeOrigin::signed(1),
+            DEVICE
+        ));
+        assert_eq!(
+            Registry::check_solution(&solution),
+            Err(SolutionRejection::DeviceExiting)
+        );
+        assert_eq!(Balances::balance_on_hold(&HoldReason::get(), &1), BOND);
+        assert_noop!(
+            Registry::deregister_device(RuntimeOrigin::signed(1), DEVICE),
+            Error::<Test>::ExitAlreadyRequested
+        );
+
+        // Step 2 too early: the exit delay (5 blocks in the mock) gates it.
+        assert_noop!(
+            Registry::finalize_deregistration(RuntimeOrigin::signed(1), DEVICE),
+            Error::<Test>::ExitDelayNotElapsed
+        );
+        System::set_block_number(11 + 5);
+        assert_ok!(Registry::finalize_deregistration(
             RuntimeOrigin::signed(1),
             DEVICE
         ));
@@ -540,18 +567,243 @@ fn deregistration_waits_out_the_escrow_window() {
         setup_registered_device();
         crate::Pallet::<Test>::note_block_reward(DEVICE, 500);
 
-        // Escrowed pay cannot be walked out from under a pending audit.
+        // Requesting exit is always allowed; it is finalization that cannot
+        // walk escrowed pay out from under a pending audit.
+        assert_ok!(Registry::deregister_device(
+            RuntimeOrigin::signed(1),
+            DEVICE
+        ));
+        System::set_block_number(System::block_number() + 5); // exit delay
         assert_noop!(
-            Registry::deregister_device(RuntimeOrigin::signed(1), DEVICE),
+            Registry::finalize_deregistration(RuntimeOrigin::signed(1), DEVICE),
             Error::<Test>::EscrowPending
         );
 
         // Once the window passes and the reward is released, exit is free.
         advance_and_settle();
         advance_and_settle();
-        assert_ok!(Registry::deregister_device(
+        assert_ok!(Registry::finalize_deregistration(
             RuntimeOrigin::signed(1),
             DEVICE
+        ));
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Opening challenges (data-availability escalations)
+// ---------------------------------------------------------------------------
+
+/// A signed solution over the sparse coverage {1, 3} (strictly ascending),
+/// with the partials leaves returned for building openings.
+fn sparse_solution(
+    model_id: Id32,
+    tiles: &[[u8; TILE_BYTES]],
+) -> (PorwSolution, Vec<u32>, Vec<Hash32>) {
+    let slot_seed = derive_slot_seed(&CHALLENGE, &DEVICE);
+    let coverage: [u64; 2] = [1, 3];
+    let s_tiles: Vec<u32> = coverage
+        .iter()
+        .map(|&i| sketch_tile(slot_seed, i, &tiles[i as usize]))
+        .collect();
+    let partial_leaves: Vec<Hash32> = coverage
+        .iter()
+        .zip(&s_tiles)
+        .map(|(&i, &s)| partials_leaf(i, s))
+        .collect();
+    let mut solution = PorwSolution {
+        device_id: DEVICE,
+        model_id,
+        sketch: s_tiles.iter().fold(0u32, |a, s| a.wrapping_add(*s)),
+        partials_root: merkle_root(&partial_leaves),
+        coverage_bytes: (coverage.len() * TILE_BYTES) as u64,
+        m_t_millis: 1000,
+        chunk_index: 0,
+        signature: [0u8; 64],
+    };
+    solution.signature = sign_solution(&solution, &CHALLENGE);
+    (solution, s_tiles, partial_leaves)
+}
+
+fn witness(
+    coverage: &[u64],
+    s_tiles: &[u32],
+    partial_leaves: &[Hash32],
+    pos: usize,
+) -> subspace_proof_of_residency::LeafWitness {
+    subspace_proof_of_residency::LeafWitness {
+        tile_idx: coverage[pos],
+        s_tile: s_tiles[pos],
+        index: pos as u64,
+        proof: merkle_proof(partial_leaves, pos),
+    }
+}
+
+#[test]
+fn opening_challenge_is_answered_with_a_commitment_opening() {
+    new_test_ext().execute_with(|| {
+        let (model_id, tiles, _) = setup_registered_device();
+        let (solution, s_tiles, partial_leaves) = sparse_solution(model_id, &tiles);
+        let root = solution.partials_root;
+        let coverage = [1u64, 3];
+
+        // Challenger (account 2) demands the opening for committed tile 3.
+        let challenger_held_before = Balances::balance_on_hold(&HoldReason::get(), &2);
+        assert_ok!(Registry::challenge_opening(
+            RuntimeOrigin::signed(2),
+            solution.clone(),
+            CHALLENGE,
+            3
+        ));
+        assert_eq!(
+            Balances::balance_on_hold(&HoldReason::get(), &2),
+            challenger_held_before + 7 // deposit held
+        );
+        // Duplicate challenge is refused.
+        assert_noop!(
+            Registry::challenge_opening(RuntimeOrigin::signed(2), solution.clone(), CHALLENGE, 3),
+            Error::<Test>::ChallengeExists
+        );
+
+        // A wrong answer does not close the challenge.
+        assert_noop!(
+            Registry::respond_opening(
+                RuntimeOrigin::signed(1),
+                DEVICE,
+                root,
+                3,
+                subspace_proof_of_residency::OpeningResponse::NotCommitted {
+                    left: Some(witness(&coverage, &s_tiles, &partial_leaves, 1)),
+                    right: None,
+                }
+            ),
+            Error::<Test>::BadOpeningResponse
+        );
+
+        // The real opening answers it; the deposit compensates the owner.
+        let owner_before = Balances::free_balance(1);
+        assert_ok!(Registry::respond_opening(
+            RuntimeOrigin::signed(1),
+            DEVICE,
+            root,
+            3,
+            subspace_proof_of_residency::OpeningResponse::Committed(witness(
+                &coverage,
+                &s_tiles,
+                &partial_leaves,
+                1
+            ))
+        ));
+        assert_eq!(Balances::free_balance(1), owner_before + 7);
+        assert_eq!(Balances::balance_on_hold(&HoldReason::get(), &2), 0);
+        assert!(crate::OpeningChallenges::<Test>::get(DEVICE, (root, 3)).is_none());
+    });
+}
+
+#[test]
+fn opening_challenge_for_uncommitted_tile_is_answered_with_non_inclusion() {
+    new_test_ext().execute_with(|| {
+        let (model_id, tiles, _) = setup_registered_device();
+        let (solution, s_tiles, partial_leaves) = sparse_solution(model_id, &tiles);
+        let root = solution.partials_root;
+        let coverage = [1u64, 3];
+
+        // Tile 2 was never committed (coverage = {1, 3}): the device proves
+        // non-commitment with the adjacent bracketing leaves.
+        assert_ok!(Registry::challenge_opening(
+            RuntimeOrigin::signed(2),
+            solution,
+            CHALLENGE,
+            2
+        ));
+        assert_ok!(Registry::respond_opening(
+            RuntimeOrigin::signed(1),
+            DEVICE,
+            root,
+            2,
+            subspace_proof_of_residency::OpeningResponse::NotCommitted {
+                left: Some(witness(&coverage, &s_tiles, &partial_leaves, 0)),
+                right: Some(witness(&coverage, &s_tiles, &partial_leaves, 1)),
+            }
+        ));
+        assert!(crate::OpeningChallenges::<Test>::get(DEVICE, (root, 2)).is_none());
+    });
+}
+
+#[test]
+fn unanswered_opening_challenge_slashes_like_fraud() {
+    new_test_ext().execute_with(|| {
+        let (model_id, tiles, _) = setup_registered_device();
+        let (solution, ..) = sparse_solution(model_id, &tiles);
+        let root = solution.partials_root;
+
+        // The device also has an escrowed reward — refusal costs it too.
+        crate::Pallet::<Test>::note_block_reward(DEVICE, 500);
+        let supply_before = Balances::total_issuance();
+
+        assert_ok!(Registry::challenge_opening(
+            RuntimeOrigin::signed(2),
+            solution,
+            CHALLENGE,
+            3
+        ));
+        // Cannot claim before the deadline (window = 5 in the mock).
+        assert_noop!(
+            Registry::claim_expired_challenge(RuntimeOrigin::signed(2), DEVICE, root, 3),
+            Error::<Test>::ChallengeNotExpired
+        );
+
+        System::set_block_number(System::block_number() + 6);
+        // Too late to answer now.
+        assert_noop!(
+            Registry::respond_opening(
+                RuntimeOrigin::signed(1),
+                DEVICE,
+                root,
+                3,
+                subspace_proof_of_residency::OpeningResponse::NotCommitted {
+                    left: None,
+                    right: None,
+                }
+            ),
+            Error::<Test>::ChallengeExpired
+        );
+
+        let challenger_before = Balances::free_balance(2);
+        assert_ok!(Registry::claim_expired_challenge(
+            RuntimeOrigin::signed(2),
+            DEVICE,
+            root,
+            3
+        ));
+        // Bond to the challenger, deposit returned (challenger_before was
+        // measured with the 7-unit deposit held), device revoked, escrow
+        // forfeited (never minted).
+        assert_eq!(Balances::free_balance(2), challenger_before + BOND + 7);
+        assert_eq!(Balances::balance_on_hold(&HoldReason::get(), &2), 0);
+        assert!(Devices::<Test>::get(DEVICE).is_none());
+        assert!(crate::EscrowedRewards::<Test>::iter().next().is_none());
+        assert_eq!(Balances::total_issuance(), supply_before);
+    });
+}
+
+#[test]
+fn model_cap_bounds_registrations() {
+    new_test_ext().execute_with(|| {
+        // MaxModels = 8 in the mock.
+        for i in 0..8u8 {
+            tiny_model([i; 32], 1);
+        }
+        assert_noop!(
+            Registry::register_model(RuntimeOrigin::root(), [0xFF; 32], TILE_BYTES as u64, 1, 1),
+            Error::<Test>::TooManyModels
+        );
+        // Re-registering an existing model updates in place (no growth).
+        assert_ok!(Registry::register_model(
+            RuntimeOrigin::root(),
+            [0; 32],
+            TILE_BYTES as u64,
+            1,
+            2
         ));
     });
 }

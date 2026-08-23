@@ -195,9 +195,19 @@ sketch 只依赖挑战系数 × 权重字节 × 覆盖集，而 DSN 碎片对 `R
 |---|---|---|
 | P0 | 介质无关审计放大，验证 solution range 统计行为 | 设计完成 |
 | P1 | sketch 规范 + 内核原型 + A100 实测 | **已完成（§8）** |
-| P2 | 共识层落地：Solution 改造、注册 pallet、验证路径、质押缩放合流 | 下一步 |
-| P3 | 真实 vLLM 集成（路由遥测 + 定向扫描）、testnet | 规划中 |
-| P4 | attestation 闭环（TDX/SNP + H100 CC）、D 支柱、副本核验与罚没 | 规划中 |
+| P2 | 共识层落地：共识原语 crate、注册 pallet（bond/罚没/欺诈证明）、runtime API、验证与出块路径、质押缩放合流 | **已完成**（纯 CPU 端到端全绿） |
+| P2.5 | 副本交叉核验调度：epoch 信标（PoT 随机性）+ 纯函数派单 + 奖励托管/追回 + opening 可用性挑战 + 退出延迟；需求跟随的模型奖励权重与费用燃烧 | **已完成**（链上 + agent 侧 + 端到端定罪测试） |
+| P3 | 真实节点服务集成（PoT gadget、组网、多节点）、GPU SketchBackend、真实 vLLM 路由遥测、testnet | 下一步 |
+| P4 | attestation 硬件闭环（TDX/SNP + H100 CC）：NVIDIA NRAS/SPDM 与 TDX/SNP wire format 解析、生产根证书接入；D 支柱每请求 quote | 部分完成（格式无关的 ed25519 证明链验证核心与 pallet 接入已落地，硬件专属解析未做） |
+
+当前实现状态（本仓库,纯 CPU、零 TEE 可复现）：agent 产签名 solution
+→ 真实 attestation 证据注册 → 链上快速路径 + 共识距离校验 →
+`claim_porw_slot` 产块 → 设备密钥封印 → 导入验证（含封印校验),
+形成增长的链；说谎副本被信标派单的审计副本抓获 → bond 罚给举报人 +
+托管奖励追回。已知边界（诚实列示）：`m_t` 仍是包络封顶的软信任点
+（§9)；bond 退出已有两阶段延迟状态机,信标熵源在生产 runtime 取
+PoT 随机性；真实 NVIDIA/TDX/SNP wire format 与生产根证书待 P4 硬件
+环境接入。
 
 ## 11. 相关工作
 

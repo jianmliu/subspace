@@ -59,6 +59,12 @@ pub enum AgentError {
     /// The coverage set referenced a tile the resident model does not have.
     #[error("coverage tile {tile} out of range (model has {tile_count} tiles)")]
     CoverageOutOfRange { tile: u64, tile_count: u64 },
+    /// The coverage set is not strictly ascending. The protocol requires
+    /// coverage committed in strictly ascending tile order so the device can
+    /// later prove NON-commitment of a tile (adjacent-leaf non-inclusion,
+    /// `verify_opening_response`) when answering an opening challenge.
+    #[error("coverage set must be strictly ascending")]
+    CoverageUnsorted,
     /// The slot's coverage and service multiplier earned zero lottery tickets,
     /// so there is nothing to author (the chain would reject any solution).
     #[error("coverage/multiplier earned zero tickets this slot")]
@@ -140,6 +146,9 @@ impl<B: SketchBackend> PorwAgent<B> {
         let tile_count = self.backend.tile_count();
         if let Some(&tile) = ctx.coverage.iter().find(|&&t| t >= tile_count) {
             return Err(AgentError::CoverageOutOfRange { tile, tile_count });
+        }
+        if !ctx.coverage.windows(2).all(|w| w[0] < w[1]) {
+            return Err(AgentError::CoverageUnsorted);
         }
         let params = SolutionParams {
             device_id: self.device_id,

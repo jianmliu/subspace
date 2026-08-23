@@ -20,9 +20,8 @@ use log::warn;
 pub use pallet::*;
 use serde::{Deserialize, Serialize};
 use sp_core::U256;
-use sp_runtime::Saturating;
 use sp_runtime::traits::{CheckedSub, One, Zero};
-use sp_runtime::Vec;
+use sp_runtime::{Saturating, Vec};
 use subspace_runtime_primitives::{BlockNumber, FindBlockRewardAddress, FindVotingRewardAddresses};
 pub use weights::WeightInfo;
 
@@ -280,39 +279,42 @@ impl<T: Config> Pallet<T> {
             // Issue reward later once all voters were taxed
         }
 
-            let voters = T::FindVotingRewardAddresses::find_voting_reward_addresses();
-            if !voters.is_empty() {
-                let vote_reward = Self::vote_reward(&VoterSubsidyPoints::<T>::get(), block_number);
-                // Tax voter
-                let proposer_tax = vote_reward / T::ProposerTaxOnVotes::get().1.into()
-                    * T::ProposerTaxOnVotes::get().0.into();
-                // Subtract tax from vote reward
-                let vote_reward = vote_reward - proposer_tax;
+        let voters = T::FindVotingRewardAddresses::find_voting_reward_addresses();
+        if !voters.is_empty() {
+            let vote_reward = Self::vote_reward(&VoterSubsidyPoints::<T>::get(), block_number);
+            // Tax voter
+            let proposer_tax = vote_reward / T::ProposerTaxOnVotes::get().1.into()
+                * T::ProposerTaxOnVotes::get().0.into();
+            // Subtract tax from vote reward
+            let vote_reward = vote_reward - proposer_tax;
 
-                let voter_count: BalanceOf<T> = BalanceOf::<T>::from(voters.len() as u32);
-                let voter_reward_pool = vote_reward.saturating_mul(voter_count);
-                let proposer_tax_total = proposer_tax.saturating_mul(voter_count);
+            let voter_count: BalanceOf<T> = BalanceOf::<T>::from(voters.len() as u32);
+            let voter_reward_pool = vote_reward.saturating_mul(voter_count);
+            let proposer_tax_total = proposer_tax.saturating_mul(voter_count);
 
-                let any_nonzero = voters.iter().any(|(_, weight)| !weight.is_zero());
-                let weighted_voters: Vec<_> = if any_nonzero {
-                    voters
-                        .into_iter()
-                        .filter(|(_voter, weight)| !weight.is_zero())
-                        .collect()
-                } else {
-                    // All weights are zero: fall back to equal share across voters.
-                    voters
-                        .into_iter()
-                        .map(|(voter, _)| (voter, BalanceOf::<T>::one()))
-                        .collect()
-                };
+            let any_nonzero = voters.iter().any(|(_, weight)| !weight.is_zero());
+            let weighted_voters: Vec<_> = if any_nonzero {
+                voters
+                    .into_iter()
+                    .filter(|(_voter, weight)| !weight.is_zero())
+                    .collect()
+            } else {
+                // All weights are zero: fall back to equal share across voters.
+                voters
+                    .into_iter()
+                    .map(|(voter, _)| (voter, BalanceOf::<T>::one()))
+                    .collect()
+            };
 
-            let total_weight = weighted_voters.iter().fold(
-                BalanceOf::<T>::zero(),
-                |acc, (_voter, weight)| acc + *weight,
-            );
+            let total_weight = weighted_voters
+                .iter()
+                .fold(BalanceOf::<T>::zero(), |acc, (_voter, weight)| {
+                    acc.saturating_add(*weight)
+                });
 
-            if !total_weight.is_zero() && (!voter_reward_pool.is_zero() || !proposer_tax_total.is_zero()) {
+            if !total_weight.is_zero()
+                && (!voter_reward_pool.is_zero() || !proposer_tax_total.is_zero())
+            {
                 let available_voter_pool = voter_reward_pool.min(new_remaining_issuance);
                 new_remaining_issuance -= available_voter_pool;
 
@@ -329,7 +331,11 @@ impl<T: Config> Pallet<T> {
                 let weighted_voters_len = weighted_voters.len();
                 for (index, (voter, weight)) in weighted_voters.into_iter().enumerate() {
                     let is_last = index + 1 == weighted_voters_len;
-                    let mut reward = total_voter_pool.saturating_mul(weight) / total_weight;
+                    // Widen to 256 bits for pool × weight: with stake-derived
+                    // weights (up to MaxVotingBalance ≈ 10^25) and AI3-scale
+                    // pools (10^18+) the u128 product saturates, which would
+                    // silently misallocate shares across voters.
+                    let mut reward = Self::mul_div(total_voter_pool, weight, total_weight);
                     if is_last {
                         reward = reward.saturating_add(
                             total_voter_pool.saturating_sub(distributed.saturating_add(reward)),
@@ -444,6 +450,19 @@ impl<T: Config> Pallet<T> {
                     .and_then(|point| (block_height >= point.block).then_some(point.subsidy))
             })
             .unwrap_or_default()
+    }
+
+    /// `a * b / d` with the product widened to 256 bits, so stake-scale
+    /// weights cannot saturate the intermediate and skew the split. The
+    /// result is ≤ `a` whenever `b <= d` (always true for a share of a
+    /// total), so narrowing back is lossless; a malformed `b > d` saturates.
+    fn mul_div(a: BalanceOf<T>, b: BalanceOf<T>, d: BalanceOf<T>) -> BalanceOf<T> {
+        use sp_runtime::SaturatedConversion;
+        let d = U256::from(d.saturated_into::<u128>()).max(U256::one());
+        let wide = U256::from(a.saturated_into::<u128>())
+            .saturating_mul(U256::from(b.saturated_into::<u128>()))
+            / d;
+        BalanceOf::<T>::saturated_from(u128::try_from(wide).unwrap_or(u128::MAX))
     }
 
     fn block_number_to_balance<N>(n: N) -> BalanceOf<T>

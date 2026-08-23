@@ -358,3 +358,136 @@ fn audit_tile_sample_is_deterministic_distinct_and_bounded() {
     );
     assert!(audit_tile_sample(&beacon, &model, &target, &auditor, 0, 4).is_empty());
 }
+
+#[test]
+fn opening_responses_prove_commitment_and_non_commitment() {
+    // Strictly ascending sparse coverage over tiles {1, 3}; challenged tiles
+    // 0 (before), 2 (between), 3 (committed), 5 (after).
+    let challenge = [9u8; 32];
+    let device_id = [3u8; 32];
+    let slot_seed = derive_slot_seed(&challenge, &device_id);
+    let tiles = buffer_tiles(&reference_buffer());
+    let coverage: [u64; 2] = [1, 3];
+    let s_tiles: Vec<u32> = coverage
+        .iter()
+        .map(|&i| sketch_tile(slot_seed, i, &tiles[i as usize]))
+        .collect();
+    let leaves: Vec<Hash32> = coverage
+        .iter()
+        .zip(&s_tiles)
+        .map(|(&i, &s)| partials_leaf(i, s))
+        .collect();
+    let root = merkle_root(&leaves);
+    let n_leaves = leaves.len() as u64;
+    let wit = |pos: usize| LeafWitness {
+        tile_idx: coverage[pos],
+        s_tile: s_tiles[pos],
+        index: pos as u64,
+        proof: merkle_proof(&leaves, pos),
+    };
+
+    // Committed tile: opening verifies and returns the committed value.
+    assert_eq!(
+        verify_opening_response(&root, n_leaves, 3, &OpeningResponse::Committed(wit(1))),
+        Ok(Some(s_tiles[1]))
+    );
+    // Claiming the wrong tile with a real leaf fails.
+    assert_eq!(
+        verify_opening_response(&root, n_leaves, 2, &OpeningResponse::Committed(wit(1))),
+        Err(())
+    );
+
+    // Between two committed leaves: bracketed non-inclusion.
+    assert_eq!(
+        verify_opening_response(
+            &root,
+            n_leaves,
+            2,
+            &OpeningResponse::NotCommitted {
+                left: Some(wit(0)),
+                right: Some(wit(1)),
+            }
+        ),
+        Ok(None)
+    );
+    // Before the first leaf.
+    assert_eq!(
+        verify_opening_response(
+            &root,
+            n_leaves,
+            0,
+            &OpeningResponse::NotCommitted {
+                left: None,
+                right: Some(wit(0)),
+            }
+        ),
+        Ok(None)
+    );
+    // After the last leaf.
+    assert_eq!(
+        verify_opening_response(
+            &root,
+            n_leaves,
+            5,
+            &OpeningResponse::NotCommitted {
+                left: Some(wit(1)),
+                right: None,
+            }
+        ),
+        Ok(None)
+    );
+
+    // A committed tile cannot be denied: any non-inclusion shape around it
+    // fails (tile 3 IS the last leaf; claiming "after last" needs
+    // l.tile_idx < challenged which fails, bracketing fails adjacency/order).
+    assert_eq!(
+        verify_opening_response(
+            &root,
+            n_leaves,
+            3,
+            &OpeningResponse::NotCommitted {
+                left: Some(wit(1)),
+                right: None,
+            }
+        ),
+        Err(())
+    );
+    assert_eq!(
+        verify_opening_response(
+            &root,
+            n_leaves,
+            3,
+            &OpeningResponse::NotCommitted {
+                left: Some(wit(0)),
+                right: Some(wit(1)),
+            }
+        ),
+        Err(())
+    );
+    // Non-adjacent bracket is rejected (hiding a leaf between them).
+    assert_eq!(
+        verify_opening_response(
+            &root,
+            n_leaves,
+            2,
+            &OpeningResponse::NotCommitted {
+                left: Some(wit(0)),
+                right: Some(LeafWitness { index: 2, ..wit(1) }),
+            }
+        ),
+        Err(())
+    );
+    // Empty answer never verifies.
+    assert_eq!(
+        verify_opening_response(
+            &root,
+            n_leaves,
+            2,
+            &OpeningResponse::NotCommitted {
+                left: None,
+                right: None,
+            }
+        ),
+        Err(())
+    );
+}

@@ -128,6 +128,19 @@ impl pallet_porw_registry::Config for Test {
     // One block per epoch keeps the tokenomics tests legible: advancing the
     // block number by one between settlements crosses exactly one epoch.
     type EpochLength = ConstU64<1>;
+    type BeaconEntropy = TestBeaconEntropy;
+    type ExitDelay = ConstU64<5>;
+    type OpeningChallengeWindow = ConstU64<5>;
+    type OpeningChallengeDeposit = ConstU128<7>;
+    type MaxModels = ConstU32<8>;
+}
+
+/// Deterministic beacon entropy for tests (stands in for PoT randomness).
+pub struct TestBeaconEntropy;
+impl frame_support::traits::Get<Option<[u8; 32]>> for TestBeaconEntropy {
+    fn get() -> Option<[u8; 32]> {
+        Some([0xEE; 32])
+    }
 }
 
 pub fn new_test_ext() -> sp_io::TestExternalities {

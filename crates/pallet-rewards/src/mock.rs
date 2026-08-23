@@ -1,8 +1,8 @@
 use frame_support::derive_impl;
 use frame_support::traits::{ConstU32, ConstU128};
 use sp_runtime::BuildStorage;
-use std::cell::RefCell;
 use sp_runtime::traits::parameter_types;
+use std::cell::RefCell;
 use subspace_runtime_primitives::{
     ConsensusEventSegmentSize, FindBlockRewardAddress, FindVotingRewardAddresses, RewardsEnabled,
 };

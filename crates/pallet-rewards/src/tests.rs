@@ -1,5 +1,5 @@
-use crate::{RemainingIssuance, RewardPoint, VoterSubsidyPoints};
 use crate::mock::Test;
+use crate::{RemainingIssuance, RewardPoint, VoterSubsidyPoints};
 use frame_support::BoundedVec;
 
 type Pallet = crate::Pallet<Test>;
@@ -119,7 +119,7 @@ fn correct_block_vote_reward() {
 
 #[test]
 fn vote_rewards_are_weighted() {
-    use crate::mock::{new_test_ext, MOCK_VOTERS};
+    use crate::mock::{MOCK_VOTERS, new_test_ext};
     use frame_support::traits::Hooks;
     use pallet_balances::Pallet as Balances;
 
@@ -149,6 +149,41 @@ fn vote_rewards_are_weighted() {
         assert_eq!(Balances::<Test>::free_balance(&2), 150);
 
         // Clean up for other tests
+        MOCK_VOTERS.with(|v| v.borrow_mut().clear());
+    });
+}
+
+#[test]
+fn stake_scale_weights_split_rewards_without_saturation() {
+    use crate::mock::{MOCK_VOTERS, new_test_ext};
+    use frame_support::traits::Hooks;
+
+    new_test_ext().execute_with(|| {
+        // Stake-derived weights at realistic scale (~10^25, i.e. millions of
+        // 10^18-precision tokens) against an AI3-scale reward pool (10^18).
+        // The naive u128 `pool * weight` is ~10^43 and saturates, silently
+        // skewing the split; the widened math must keep the exact 1:3 ratio.
+        let w: u128 = 10u128.pow(25);
+        MOCK_VOTERS.with(|v| {
+            *v.borrow_mut() = vec![(1, w), (2, 3 * w)];
+        });
+        let points: BoundedVec<_, _> = vec![RewardPoint {
+            block: 0,
+            subsidy: 10u128.pow(18),
+        }]
+        .try_into()
+        .unwrap();
+        VoterSubsidyPoints::<Test>::put(points);
+        RemainingIssuance::<Test>::put(10u128.pow(19));
+
+        frame_system::Pallet::<Test>::set_block_number(1);
+        Pallet::on_finalize(1);
+
+        let v1 = pallet_balances::Pallet::<Test>::free_balance(&1);
+        let v2 = pallet_balances::Pallet::<Test>::free_balance(&2);
+        assert!(v1 > 0);
+        assert_eq!(v2, 3 * v1, "weighted split must stay exactly 1:3");
+
         MOCK_VOTERS.with(|v| v.borrow_mut().clear());
     });
 }
