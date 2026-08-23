@@ -4,6 +4,9 @@
 
 状态：研究草案 v0.4（2026-08）
 
+> English edition: [`proof-of-resident-weights.en.md`](proof-of-resident-weights.en.md)。
+> 本中文版为规范版本，两版有出入时以中文为准。
+
 > v0.2 变更：删除「专用扫描」模式——审计完全跟随真实推理（单一模式）；
 > 抽签权重改为「唯一覆盖门票 × TEE 计量的服务量乘数（硬件包络封顶）」，
 > 即多劳多得；MoE 天然支持（覆盖集 = 实际激活的专家）；
