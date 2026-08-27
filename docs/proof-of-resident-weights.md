@@ -7,6 +7,14 @@
 > English edition: [`proof-of-resident-weights.en.md`](proof-of-resident-weights.en.md)。
 > 本中文版为规范版本，两版有出入时以中文为准。
 
+> **生态定位**（2026-08）：链中立的 MEP/PoRW 规范已迁移至
+> [`aigg-spec`](https://github.com/jianmliu/aigg-spec)（模块化接口、EVM 部署、
+> AI3 Domain 提案）。本仓库按其 §10.9 定位为 **PoRW 研究与实现参考**：
+> 本文的 L1 双轨共识是研究载体；产品化路径按 aigg-spec 走 GPU Domain /
+> EVM Worker 协议（不改 PoAS），复用本分支的验证器、注册表、审计与托管
+> 组件。逐条映射与差距见
+> [`porw-spec-alignment.md`](porw-spec-alignment.md)。
+
 > v0.2 变更：删除「专用扫描」模式——审计完全跟随真实推理（单一模式）；
 > 抽签权重改为「唯一覆盖门票 × TEE 计量的服务量乘数（硬件包络封顶）」，
 > 即多劳多得；MoE 天然支持（覆盖集 = 实际激活的专家）；

@@ -35,6 +35,20 @@ pub const TILE_WORDS: usize = TILE_BYTES / 4;
 /// Coefficient index stride (golden ratio, murmur-style).
 pub const GOLDEN32: u32 = 0x9E37_79B9;
 
+/// Canonical scheme identifier of this PoRW verification scheme, as pinned by
+/// `ExecutionProfile.porw_scheme_id` and returned by `IPoRWVerifier.schemeId()`
+/// in the aigg-spec modular interfaces (aigg-spec
+/// `docs/architecture/mep-porw-modular-interfaces.md` §6.4). Version 2 =
+/// 4 KiB tiles, per-word slot-fresh odd u32 coefficients (murmur3 fmix32),
+/// blake3 tile Merkle commitments, strictly-ascending coverage order.
+/// Any change to those semantics is a NEW scheme id, never a reinterpretation.
+pub const PORW_SCHEME_ID: &str = "aigg:porw:sketch-tile:v2";
+
+/// 32-byte digest of [`PORW_SCHEME_ID`] for compact on-chain verifier pinning.
+pub fn porw_scheme_digest() -> Hash32 {
+    *blake3::hash(PORW_SCHEME_ID.as_bytes()).as_bytes()
+}
+
 const FMIX_M1: u32 = 0x85EB_CA6B;
 const FMIX_M2: u32 = 0xC2B2_AE35;
 

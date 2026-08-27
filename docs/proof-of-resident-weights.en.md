@@ -7,6 +7,17 @@ Status: research draft v0.4 (2026-08)
 > This is the English edition of `proof-of-resident-weights.md`. The Chinese
 > original is canonical; when the two diverge, the Chinese text wins.
 
+> **Ecosystem positioning** (2026-08): the chain-neutral MEP/PoRW
+> specifications now live in
+> [`aigg-spec`](https://github.com/jianmliu/aigg-spec) (modular interfaces,
+> EVM deployment, AI3 Domain proposal). Per its §10.9 this repository is the
+> **PoRW research and implementation reference**: the L1 dual-track
+> consensus described here is the research vehicle, while the
+> productization path follows aigg-spec as a GPU Domain / EVM Worker
+> protocol (PoAS untouched), reusing this branch's verifier, registry,
+> audit, and escrow components. The item-by-item mapping and gaps are in
+> [`porw-spec-alignment.md`](porw-spec-alignment.md).
+
 > v0.2 changes: the "dedicated sweep" mode is removed — auditing rides
 > entirely on real inference (a single execution mode); lottery weight
 > becomes "unique-coverage tickets × TEE-metered service multiplier (capped

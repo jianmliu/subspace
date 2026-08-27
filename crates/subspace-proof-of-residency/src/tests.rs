@@ -491,3 +491,15 @@ fn opening_responses_prove_commitment_and_non_commitment() {
         Err(())
     );
 }
+
+#[test]
+fn scheme_id_is_stable() {
+    // Pinned by ExecutionProfile.porw_scheme_id / IPoRWVerifier.schemeId()
+    // in aigg-spec; a semantic change to the sketch is a NEW id, so this
+    // constant must never drift for the v2 semantics.
+    assert_eq!(PORW_SCHEME_ID, "aigg:porw:sketch-tile:v2");
+    assert_eq!(
+        porw_scheme_digest(),
+        *blake3::hash(PORW_SCHEME_ID.as_bytes()).as_bytes()
+    );
+}
