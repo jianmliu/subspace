@@ -721,3 +721,255 @@ fn conformance_fixture_is_current() {
          then UPDATE_CONFORMANCE=1"
     );
 }
+
+// ---------------------------------------------------------------------------
+// keccak-variant conformance fixture (aigg:porw:sketch-tile-keccak:v1)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn keccak_variant_basics() {
+    // Distinct scheme, distinct commitments: nothing from one scheme
+    // verifies under the other.
+    assert_eq!(keccak::PORW_SCHEME_ID, "aigg:porw:sketch-tile-keccak:v1");
+    assert_ne!(keccak::porw_scheme_digest(), porw_scheme_digest());
+    let tiles = buffer_tiles(&reference_buffer());
+    assert_ne!(
+        keccak::weights_leaf(0, &tiles[0]),
+        weights_leaf(0, &tiles[0])
+    );
+    let challenge = [9u8; 32];
+    let device = [3u8; 32];
+    assert_ne!(
+        keccak::derive_slot_seed(&challenge, &device),
+        derive_slot_seed(&challenge, &device)
+    );
+
+    // Same dispute logic end-to-end under keccak commitments: build the
+    // tampered sparse scenario and check all three verdict classes.
+    let slot_seed = keccak::derive_slot_seed(&challenge, &device);
+    let coverage: [u64; 2] = [1, 3];
+    let mut s_tiles: Vec<u32> = coverage
+        .iter()
+        .map(|&i| sketch_tile(slot_seed, i, &tiles[i as usize]))
+        .collect();
+    s_tiles[1] ^= 0xBAD;
+    let partial_leaves: Vec<Hash32> = coverage
+        .iter()
+        .zip(&s_tiles)
+        .map(|(&i, &s)| keccak::partials_leaf(i, s))
+        .collect();
+    let weight_leaves: Vec<Hash32> = tiles
+        .iter()
+        .enumerate()
+        .map(|(i, t)| keccak::weights_leaf(i as u64, t))
+        .collect();
+    let solution = PorwSolution {
+        device_id: device,
+        model_id: keccak::merkle_root(&weight_leaves),
+        sketch: s_tiles.iter().fold(0u32, |a, s| a.wrapping_add(*s)),
+        partials_root: keccak::merkle_root(&partial_leaves),
+        coverage_bytes: (coverage.len() * TILE_BYTES) as u64,
+        m_t_millis: 1000,
+        chunk_index: 0,
+        signature: [0u8; 64],
+    };
+    let proof = TileFraudProof {
+        tile_idx: 3,
+        claimed_s_tile: s_tiles[1],
+        partials_index: 1,
+        partials_proof: keccak::merkle_proof(&partial_leaves, 1),
+        tile_bytes: tiles[3].to_vec(),
+        weights_proof: keccak::merkle_proof(&weight_leaves, 3),
+    };
+    assert_eq!(
+        keccak::verify_tile_fraud_proof(&solution, &challenge, &solution.model_id, &proof),
+        FraudVerdict::Fraud
+    );
+    // The blake3 verifier must NOT accept keccak commitments.
+    assert_eq!(
+        verify_tile_fraud_proof(&solution, &challenge, &solution.model_id, &proof),
+        FraudVerdict::Invalid
+    );
+    // Non-inclusion under keccak.
+    assert_eq!(
+        keccak::verify_opening_response(
+            &solution.partials_root,
+            2,
+            2,
+            &OpeningResponse::NotCommitted {
+                left: Some(LeafWitness {
+                    tile_idx: 1,
+                    s_tile: s_tiles[0],
+                    index: 0,
+                    proof: keccak::merkle_proof(&partial_leaves, 0),
+                }),
+                right: Some(LeafWitness {
+                    tile_idx: 3,
+                    s_tile: s_tiles[1],
+                    index: 1,
+                    proof: keccak::merkle_proof(&partial_leaves, 1),
+                }),
+            }
+        ),
+        Ok(None)
+    );
+}
+
+fn generate_keccak_conformance_fixture() -> String {
+    let tiles = buffer_tiles(&reference_buffer());
+    let buffer = reference_buffer();
+
+    let weight_leaves: Vec<Hash32> = tiles
+        .iter()
+        .enumerate()
+        .map(|(i, t)| keccak::weights_leaf(i as u64, t))
+        .collect();
+    let weights_root = keccak::merkle_root(&weight_leaves);
+
+    let challenge = [9u8; 32];
+    let device_id = [3u8; 32];
+    let slot_seed = keccak::derive_slot_seed(&challenge, &device_id);
+
+    // Sketch vectors under the keccak-derived slot seed (the sketch math is
+    // shared with the blake3 scheme; the seed differs).
+    let sketches: Vec<u32> = (0..4u64)
+        .map(|i| sketch_tile(slot_seed, i, &tiles[i as usize]))
+        .collect();
+
+    let coverage: [u64; 2] = [1, 3];
+    let mut s_tiles: Vec<u32> = coverage
+        .iter()
+        .map(|&i| sketch_tile(slot_seed, i, &tiles[i as usize]))
+        .collect();
+    let honest_tile3 = s_tiles[1];
+    s_tiles[1] ^= 0xBAD;
+    let partial_leaves: Vec<Hash32> = coverage
+        .iter()
+        .zip(&s_tiles)
+        .map(|(&i, &s)| keccak::partials_leaf(i, s))
+        .collect();
+    let partials_root = keccak::merkle_root(&partial_leaves);
+
+    let proof_of = |leaves: &[Hash32], i: usize| {
+        let p = keccak::merkle_proof(leaves, i);
+        json_hash_list(&p, "        ")
+    };
+
+    format!(
+        r#"{{
+  "scheme": {{
+    "id": "{scheme_id}",
+    "digest_keccak256": "{scheme_digest}"
+  }},
+  "params": {{
+    "tile_bytes": {tile_bytes},
+    "tile_words": {tile_words},
+    "golden32": "0x9e3779b9",
+    "coverage_order": "strictly ascending tile index",
+    "hash": "keccak256",
+    "note": "sketch math identical to sketch-tile:v2; every hash (leaves, nodes, slot seed, scheme digest) is keccak256; ticket expansion is not part of this variant"
+  }},
+  "reference_buffer": {{
+    "formula": "buf[i] = ((i * 2654435761) >> 7) & 0xFF, wrapping u64 arithmetic, i in 0..n_tiles*tile_bytes",
+    "n_tiles": 4,
+    "keccak256": "{buffer_hash}"
+  }},
+  "slot_seed_derivation": {{
+    "global_challenge": "{challenge_hex}",
+    "device_id": "{device_hex}",
+    "slot_seed": {slot_seed}
+  }},
+  "sketches": [
+    {{ "slot_seed": {slot_seed}, "per_tile": [{sketch_list}] }}
+  ],
+  "weights_tree": {{
+    "leaves": [
+{weight_leaves_json}
+    ],
+    "root": "{weights_root_hex}"
+  }},
+  "tampered_commitment_scenario": {{
+    "coverage": [1, 3],
+    "honest_s_tile_for_tile_3": {honest_tile3},
+    "committed_s_tiles": [{committed0}, {committed1}],
+    "partials_leaves": [
+{partials_leaves_json}
+    ],
+    "partials_root": "{partials_root_hex}",
+    "opening_committed_tile_3": {{
+      "leaf_index": 1,
+      "proof": [
+{opening_proof}
+      ],
+      "expected": "verifies; opened value {committed1} != recomputed {honest_tile3} => TileFraudProof verdict Fraud"
+    }},
+    "non_inclusion_tile_2": {{
+      "left":  {{ "tile_idx": 1, "s_tile": {committed0}, "index": 0 }},
+      "right": {{ "tile_idx": 3, "s_tile": {committed1}, "index": 1 }},
+      "expected": "adjacent bracket verifies => proven not committed"
+    }},
+    "fraud_proof_tile_3": {{
+      "tile_idx": 3,
+      "claimed_s_tile": {committed1},
+      "partials_index": 1,
+      "partials_proof": [
+{fraud_partials_proof}
+      ],
+      "tile_bytes": "generate tile 3 from reference_buffer.formula",
+      "weights_proof": [
+{fraud_weights_proof}
+      ],
+      "expected_verdict": "Fraud"
+    }}
+  }}
+}}
+"#,
+        scheme_id = keccak::PORW_SCHEME_ID,
+        scheme_digest = hex_bytes(&keccak::porw_scheme_digest()),
+        tile_bytes = TILE_BYTES,
+        tile_words = TILE_WORDS,
+        buffer_hash = {
+            use sha3::Digest;
+            let mut out = [0u8; 32];
+            out.copy_from_slice(&sha3::Keccak256::digest(&buffer));
+            hex_bytes(&out)
+        },
+        challenge_hex = hex_bytes(&challenge),
+        device_hex = hex_bytes(&device_id),
+        sketch_list = sketches
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
+        weight_leaves_json = json_hash_list(&weight_leaves, "      "),
+        weights_root_hex = hex_bytes(&weights_root),
+        honest_tile3 = honest_tile3,
+        committed0 = s_tiles[0],
+        committed1 = s_tiles[1],
+        partials_leaves_json = json_hash_list(&partial_leaves, "      "),
+        partials_root_hex = hex_bytes(&partials_root),
+        opening_proof = proof_of(&partial_leaves, 1),
+        fraud_partials_proof = proof_of(&partial_leaves, 1),
+        fraud_weights_proof = proof_of(&weight_leaves, 3),
+    )
+}
+
+#[test]
+fn keccak_conformance_fixture_is_current() {
+    let generated = generate_keccak_conformance_fixture();
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/conformance/sketch-tile-keccak-v1.json"
+    );
+    if std::env::var("UPDATE_CONFORMANCE").is_ok() {
+        std::fs::write(path, &generated).expect("write fixture");
+        return;
+    }
+    let committed = std::fs::read_to_string(path)
+        .expect("fixture missing; run with UPDATE_CONFORMANCE=1 to create");
+    assert_eq!(
+        committed, generated,
+        "keccak-variant fixture drifted; a semantic change requires a NEW \
+         scheme id and fixture, then UPDATE_CONFORMANCE=1"
+    );
+}

@@ -102,56 +102,77 @@ pub fn derive_slot_seed(global_challenge: &[u8; 32], device_id: &[u8; 32]) -> u3
 }
 
 // ---------------------------------------------------------------------------
-// Tile Merkle commitments (binary blake3 tree, duplicate-last padding)
+// Tile Merkle commitments (binary tree, duplicate-last padding)
 // ---------------------------------------------------------------------------
+//
+// The commitment layer is parameterized over one 32-byte hash function so the
+// canonical blake3 scheme (`sketch-tile:v2`) and the EVM-native keccak256
+// variant (`sketch-tile-keccak:v1`, [`keccak`]) share every line of tree and
+// verification logic. The sketch math above is hash-free and common to both.
 
 /// 32-byte Merkle node/root.
 pub type Hash32 = [u8; 32];
 
-/// Leaf for the weights commitment `R_W`: blake3(LE64 tile_idx || tile bytes).
-pub fn weights_leaf(tile_idx: u64, tile: &[u8; TILE_BYTES]) -> Hash32 {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(&tile_idx.to_le_bytes());
-    hasher.update(tile);
-    *hasher.finalize().as_bytes()
+/// The scheme's 32-byte hash over arbitrary bytes.
+type HashFn = fn(&[u8]) -> Hash32;
+
+fn blake3_hash(data: &[u8]) -> Hash32 {
+    *blake3::hash(data).as_bytes()
 }
 
-/// Leaf for the per-slot sketch commitment `partials_root`:
-/// blake3(LE64 tile_idx || LE32 s_tile).
-pub fn partials_leaf(tile_idx: u64, s_tile: u32) -> Hash32 {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(&tile_idx.to_le_bytes());
-    hasher.update(&s_tile.to_le_bytes());
-    *hasher.finalize().as_bytes()
+fn keccak_hash(data: &[u8]) -> Hash32 {
+    use sha3::Digest;
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&sha3::Keccak256::digest(data));
+    out
 }
 
-fn merkle_parent(left: &Hash32, right: &Hash32) -> Hash32 {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(left);
-    hasher.update(right);
-    *hasher.finalize().as_bytes()
+fn weights_leaf_with(h: HashFn, tile_idx: u64, tile: &[u8; TILE_BYTES]) -> Hash32 {
+    let mut buf = Vec::with_capacity(8 + TILE_BYTES);
+    buf.extend_from_slice(&tile_idx.to_le_bytes());
+    buf.extend_from_slice(tile);
+    h(&buf)
 }
 
-/// Merkle root over leaves (duplicate-last padding at each level).
-/// Empty input yields the hash of the empty string.
-pub fn merkle_root(leaves: &[Hash32]) -> Hash32 {
+fn partials_leaf_with(h: HashFn, tile_idx: u64, s_tile: u32) -> Hash32 {
+    let mut buf = [0u8; 12];
+    buf[..8].copy_from_slice(&tile_idx.to_le_bytes());
+    buf[8..].copy_from_slice(&s_tile.to_le_bytes());
+    h(&buf)
+}
+
+fn derive_slot_seed_with(h: HashFn, global_challenge: &[u8; 32], device_id: &[u8; 32]) -> u32 {
+    let mut buf = [0u8; 64];
+    buf[..32].copy_from_slice(global_challenge);
+    buf[32..].copy_from_slice(device_id);
+    let hash = h(&buf);
+    u32::from_le_bytes([hash[0], hash[1], hash[2], hash[3]])
+}
+
+fn merkle_parent_with(h: HashFn, left: &Hash32, right: &Hash32) -> Hash32 {
+    let mut buf = [0u8; 64];
+    buf[..32].copy_from_slice(left);
+    buf[32..].copy_from_slice(right);
+    h(&buf)
+}
+
+fn merkle_root_with(h: HashFn, leaves: &[Hash32]) -> Hash32 {
     if leaves.is_empty() {
-        return *blake3::hash(&[]).as_bytes();
+        return h(&[]);
     }
     let mut level: Vec<Hash32> = leaves.to_vec();
     while level.len() > 1 {
         let mut next = Vec::with_capacity(level.len().div_ceil(2));
         for pair in level.chunks(2) {
             let right = pair.get(1).unwrap_or(&pair[0]);
-            next.push(merkle_parent(&pair[0], right));
+            next.push(merkle_parent_with(h, &pair[0], right));
         }
         level = next;
     }
     level[0]
 }
 
-/// Inclusion proof: sibling hashes from leaf level to root.
-pub fn merkle_proof(leaves: &[Hash32], mut index: usize) -> Vec<Hash32> {
+fn merkle_proof_with(h: HashFn, leaves: &[Hash32], mut index: usize) -> Vec<Hash32> {
     let mut proof = Vec::new();
     let mut level: Vec<Hash32> = leaves.to_vec();
     while level.len() > 1 {
@@ -164,7 +185,7 @@ pub fn merkle_proof(leaves: &[Hash32], mut index: usize) -> Vec<Hash32> {
         let mut next = Vec::with_capacity(level.len().div_ceil(2));
         for pair in level.chunks(2) {
             let right = pair.get(1).unwrap_or(&pair[0]);
-            next.push(merkle_parent(&pair[0], right));
+            next.push(merkle_parent_with(h, &pair[0], right));
         }
         level = next;
         index /= 2;
@@ -172,18 +193,50 @@ pub fn merkle_proof(leaves: &[Hash32], mut index: usize) -> Vec<Hash32> {
     proof
 }
 
-/// Verify an inclusion proof produced by [`merkle_proof`].
-pub fn merkle_verify(root: &Hash32, leaf: &Hash32, mut index: usize, proof: &[Hash32]) -> bool {
+fn merkle_verify_with(
+    h: HashFn,
+    root: &Hash32,
+    leaf: &Hash32,
+    mut index: usize,
+    proof: &[Hash32],
+) -> bool {
     let mut acc = *leaf;
     for sibling in proof {
         acc = if index % 2 == 0 {
-            merkle_parent(&acc, sibling)
+            merkle_parent_with(h, &acc, sibling)
         } else {
-            merkle_parent(sibling, &acc)
+            merkle_parent_with(h, sibling, &acc)
         };
         index /= 2;
     }
     acc == *root
+}
+
+/// Leaf for the weights commitment `R_W`: blake3(LE64 tile_idx || tile bytes).
+pub fn weights_leaf(tile_idx: u64, tile: &[u8; TILE_BYTES]) -> Hash32 {
+    weights_leaf_with(blake3_hash, tile_idx, tile)
+}
+
+/// Leaf for the per-slot sketch commitment `partials_root`:
+/// blake3(LE64 tile_idx || LE32 s_tile).
+pub fn partials_leaf(tile_idx: u64, s_tile: u32) -> Hash32 {
+    partials_leaf_with(blake3_hash, tile_idx, s_tile)
+}
+
+/// Merkle root over leaves (duplicate-last padding at each level).
+/// Empty input yields the hash of the empty string.
+pub fn merkle_root(leaves: &[Hash32]) -> Hash32 {
+    merkle_root_with(blake3_hash, leaves)
+}
+
+/// Inclusion proof: sibling hashes from leaf level to root.
+pub fn merkle_proof(leaves: &[Hash32], index: usize) -> Vec<Hash32> {
+    merkle_proof_with(blake3_hash, leaves, index)
+}
+
+/// Verify an inclusion proof produced by [`merkle_proof`].
+pub fn merkle_verify(root: &Hash32, leaf: &Hash32, index: usize, proof: &[Hash32]) -> bool {
+    merkle_verify_with(blake3_hash, root, leaf, index, proof)
 }
 
 // ---------------------------------------------------------------------------
@@ -436,6 +489,16 @@ pub fn verify_tile_fraud_proof(
     model_root: &Hash32,
     proof: &TileFraudProof,
 ) -> FraudVerdict {
+    verify_tile_fraud_proof_with(blake3_hash, solution, global_challenge, model_root, proof)
+}
+
+fn verify_tile_fraud_proof_with(
+    h: HashFn,
+    solution: &PorwSolution,
+    global_challenge: &[u8; 32],
+    model_root: &Hash32,
+    proof: &TileFraudProof,
+) -> FraudVerdict {
     if proof.tile_bytes.len() != TILE_BYTES {
         return FraudVerdict::Invalid;
     }
@@ -443,8 +506,9 @@ pub fn verify_tile_fraud_proof(
     // The leaf position is the coverage-order index the reporter supplies;
     // the leaf hash binds tile_idx, so the position cannot lie about which
     // tile the value was committed for.
-    let claimed_leaf = partials_leaf(proof.tile_idx, proof.claimed_s_tile);
-    if !merkle_verify(
+    let claimed_leaf = partials_leaf_with(h, proof.tile_idx, proof.claimed_s_tile);
+    if !merkle_verify_with(
+        h,
         &solution.partials_root,
         &claimed_leaf,
         proof.partials_index as usize,
@@ -458,8 +522,9 @@ pub fn verify_tile_fraud_proof(
         .as_slice()
         .try_into()
         .expect("length checked above; qed");
-    let weights_leaf_hash = weights_leaf(proof.tile_idx, tile);
-    if !merkle_verify(
+    let weights_leaf_hash = weights_leaf_with(h, proof.tile_idx, tile);
+    if !merkle_verify_with(
+        h,
         model_root,
         &weights_leaf_hash,
         proof.tile_idx as usize,
@@ -467,8 +532,10 @@ pub fn verify_tile_fraud_proof(
     ) {
         return FraudVerdict::Invalid;
     }
-    // 3. Recompute the true sketch and compare.
-    let slot_seed = derive_slot_seed(global_challenge, &solution.device_id);
+    // 3. Recompute the true sketch and compare. The slot seed is derived
+    // with the scheme's own hash, so the two schemes' seeds (and thus
+    // committed sketch values) differ by construction.
+    let slot_seed = derive_slot_seed_with(h, global_challenge, &solution.device_id);
     let true_s_tile = sketch_tile(slot_seed, proof.tile_idx, tile);
     if true_s_tile == proof.claimed_s_tile {
         FraudVerdict::NoFraud
@@ -513,11 +580,12 @@ pub struct LeafWitness {
 }
 
 impl LeafWitness {
-    fn verify(&self, partials_root: &Hash32, n_leaves: u64) -> bool {
+    fn verify_with(&self, h: HashFn, partials_root: &Hash32, n_leaves: u64) -> bool {
         self.index < n_leaves
-            && merkle_verify(
+            && merkle_verify_with(
+                h,
                 partials_root,
-                &partials_leaf(self.tile_idx, self.s_tile),
+                &partials_leaf_with(h, self.tile_idx, self.s_tile),
                 self.index as usize,
                 &self.proof,
             )
@@ -555,9 +623,25 @@ pub fn verify_opening_response(
     challenged_tile: u64,
     response: &OpeningResponse,
 ) -> Result<Option<u32>, ()> {
+    verify_opening_response_with(
+        blake3_hash,
+        partials_root,
+        n_leaves,
+        challenged_tile,
+        response,
+    )
+}
+
+fn verify_opening_response_with(
+    h: HashFn,
+    partials_root: &Hash32,
+    n_leaves: u64,
+    challenged_tile: u64,
+    response: &OpeningResponse,
+) -> Result<Option<u32>, ()> {
     match response {
         OpeningResponse::Committed(leaf) => {
-            if leaf.tile_idx == challenged_tile && leaf.verify(partials_root, n_leaves) {
+            if leaf.tile_idx == challenged_tile && leaf.verify_with(h, partials_root, n_leaves) {
                 Ok(Some(leaf.s_tile))
             } else {
                 Err(())
@@ -571,8 +655,8 @@ pub fn verify_opening_response(
                     let brackets = l.tile_idx < challenged_tile && challenged_tile < r.tile_idx;
                     if adjacent
                         && brackets
-                        && l.verify(partials_root, n_leaves)
-                        && r.verify(partials_root, n_leaves)
+                        && l.verify_with(h, partials_root, n_leaves)
+                        && r.verify_with(h, partials_root, n_leaves)
                     {
                         Ok(None)
                     } else {
@@ -583,7 +667,7 @@ pub fn verify_opening_response(
                 (Some(l), None) => {
                     if l.index + 1 == n_leaves
                         && l.tile_idx < challenged_tile
-                        && l.verify(partials_root, n_leaves)
+                        && l.verify_with(h, partials_root, n_leaves)
                     {
                         Ok(None)
                     } else {
@@ -594,7 +678,7 @@ pub fn verify_opening_response(
                 (None, Some(r)) => {
                     if r.index == 0
                         && challenged_tile < r.tile_idx
-                        && r.verify(partials_root, n_leaves)
+                        && r.verify_with(h, partials_root, n_leaves)
                     {
                         Ok(None)
                     } else {
@@ -606,6 +690,91 @@ pub fn verify_opening_response(
                 (None, None) => Err(()),
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EVM-native keccak256 scheme variant
+// ---------------------------------------------------------------------------
+
+/// The `aigg:porw:sketch-tile-keccak:v1` scheme variant: identical sketch
+/// math and tree/verification logic, with **every hash keccak256** — the
+/// EVM's native hash — so contract-side dispute verification costs ~7×
+/// less than the blake3 scheme (see `docs/porw-evm-feasibility.md`).
+///
+/// This is a DIFFERENT scheme id with its own conformance vectors
+/// (`conformance/sketch-tile-keccak-v1.json`); commitments from one scheme
+/// never verify under the other, and the per-device slot seed (hence every
+/// committed sketch value) differs by construction. Adopted as the
+/// designated cost-reduction step for the EVM deployment via the aigg-spec
+/// process; the blake3 scheme remains canonical on the Substrate L1
+/// research track. Ticket expansion (`ticket_chunk`) is not part of this
+/// variant — the EVM pilot consumes capacity facts, not a lottery.
+pub mod keccak {
+    use super::*;
+
+    /// Canonical scheme identifier of the keccak variant.
+    pub const PORW_SCHEME_ID: &str = "aigg:porw:sketch-tile-keccak:v1";
+
+    /// keccak256 digest of [`PORW_SCHEME_ID`] (EVM-native pinning).
+    pub fn porw_scheme_digest() -> Hash32 {
+        keccak_hash(PORW_SCHEME_ID.as_bytes())
+    }
+
+    /// keccak256(LE64 tile_idx || tile bytes).
+    pub fn weights_leaf(tile_idx: u64, tile: &[u8; TILE_BYTES]) -> Hash32 {
+        weights_leaf_with(keccak_hash, tile_idx, tile)
+    }
+
+    /// keccak256(LE64 tile_idx || LE32 s_tile).
+    pub fn partials_leaf(tile_idx: u64, s_tile: u32) -> Hash32 {
+        partials_leaf_with(keccak_hash, tile_idx, s_tile)
+    }
+
+    /// First 4 LE bytes of keccak256(global_challenge || device_id).
+    pub fn derive_slot_seed(global_challenge: &[u8; 32], device_id: &[u8; 32]) -> u32 {
+        derive_slot_seed_with(keccak_hash, global_challenge, device_id)
+    }
+
+    /// Merkle root (duplicate-last padding, keccak256 nodes).
+    pub fn merkle_root(leaves: &[Hash32]) -> Hash32 {
+        merkle_root_with(keccak_hash, leaves)
+    }
+
+    /// Inclusion proof for [`merkle_root`].
+    pub fn merkle_proof(leaves: &[Hash32], index: usize) -> Vec<Hash32> {
+        merkle_proof_with(keccak_hash, leaves, index)
+    }
+
+    /// Verify an inclusion proof.
+    pub fn merkle_verify(root: &Hash32, leaf: &Hash32, index: usize, proof: &[Hash32]) -> bool {
+        merkle_verify_with(keccak_hash, root, leaf, index, proof)
+    }
+
+    /// [`super::verify_tile_fraud_proof`] under keccak commitments.
+    pub fn verify_tile_fraud_proof(
+        solution: &PorwSolution,
+        global_challenge: &[u8; 32],
+        model_root: &Hash32,
+        proof: &TileFraudProof,
+    ) -> FraudVerdict {
+        verify_tile_fraud_proof_with(keccak_hash, solution, global_challenge, model_root, proof)
+    }
+
+    /// [`super::verify_opening_response`] under keccak commitments.
+    pub fn verify_opening_response(
+        partials_root: &Hash32,
+        n_leaves: u64,
+        challenged_tile: u64,
+        response: &OpeningResponse,
+    ) -> Result<Option<u32>, ()> {
+        verify_opening_response_with(
+            keccak_hash,
+            partials_root,
+            n_leaves,
+            challenged_tile,
+            response,
+        )
     }
 }
 

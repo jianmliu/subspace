@@ -17,6 +17,7 @@ bench = false
 blake3.workspace = true
 parity-scale-codec = { workspace = true, features = ["derive"] }
 scale-info = { workspace = true, features = ["derive"] }
+sha3.workspace = true
 
 [features]
 default = ["std"]
@@ -24,4 +25,5 @@ std = [
     "blake3/std",
     "parity-scale-codec/std",
     "scale-info/std",
+    "sha3/std",
 ]

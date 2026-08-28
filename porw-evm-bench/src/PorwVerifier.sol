@@ -111,7 +111,13 @@ contract PorwVerifier {
         return acc == root;
     }
 
-    /// keccak256 variant — gas comparison only (a NEW scheme id if adopted).
+    // ------------------------------------------------------------------
+    // `aigg:porw:sketch-tile-keccak:v1` — the EVM-native scheme variant
+    // (same sketch math; every hash keccak256). Adopted as the designated
+    // cost-reduction step via the aigg-spec process; semantics pinned by
+    // `conformance/sketch-tile-keccak-v1.json`.
+    // ------------------------------------------------------------------
+
     function merkleVerifyKeccak(bytes32 root, bytes32 leaf, uint256 index, bytes32[] calldata proof)
         public
         pure
@@ -123,6 +129,64 @@ contract PorwVerifier {
             index /= 2;
         }
         return acc == root;
+    }
+
+    /// keccak256(LE64 tile_idx || LE32 s_tile)
+    function partialsLeafKeccak(uint64 tileIdx, uint32 sTile) public pure returns (bytes32) {
+        return keccak256(bytes.concat(le64(tileIdx), le32(sTile)));
+    }
+
+    /// keccak256(LE64 tile_idx || tile bytes)
+    function weightsLeafKeccak(uint64 tileIdx, bytes calldata tile) public pure returns (bytes32) {
+        require(tile.length == TILE_BYTES, "tile length");
+        return keccak256(bytes.concat(le64(tileIdx), tile));
+    }
+
+    /// first 4 LE bytes of keccak256(global_challenge || device_id)
+    function deriveSlotSeedKeccak(bytes32 globalChallenge, bytes32 deviceId) public pure returns (uint32) {
+        bytes32 h = keccak256(bytes.concat(globalChallenge, deviceId));
+        return
+            uint32(uint8(h[0])) | (uint32(uint8(h[1])) << 8) | (uint32(uint8(h[2])) << 16) | (uint32(uint8(h[3])) << 24);
+    }
+
+    /// `verify_tile_fraud_proof` under keccak commitments.
+    /// Returns 0 = Fraud, 1 = NoFraud, 2 = Invalid.
+    function verifyTileFraudProofKeccak(
+        bytes32 partialsRoot,
+        bytes32 modelRoot,
+        bytes32 globalChallenge,
+        bytes32 deviceId,
+        uint64 tileIdx,
+        uint32 claimedSTile,
+        uint256 partialsIndex,
+        bytes32[] calldata partialsProof,
+        bytes calldata tileBytes,
+        bytes32[] calldata weightsProof
+    ) external pure returns (uint8) {
+        if (tileBytes.length != TILE_BYTES) return 2;
+        if (!merkleVerifyKeccak(partialsRoot, partialsLeafKeccak(tileIdx, claimedSTile), partialsIndex, partialsProof))
+        {
+            return 2;
+        }
+        if (!merkleVerifyKeccak(modelRoot, weightsLeafKeccak(tileIdx, tileBytes), tileIdx, weightsProof)) {
+            return 2;
+        }
+        uint32 slotSeed = deriveSlotSeedKeccak(globalChallenge, deviceId);
+        uint32 trueSTile = sketchTile(slotSeed, tileIdx, tileBytes);
+        return trueSTile == claimedSTile ? 1 : 0;
+    }
+
+    /// `verify_opening_response` Committed arm under keccak commitments.
+    function verifyOpeningCommittedKeccak(
+        bytes32 partialsRoot,
+        uint64 nLeaves,
+        uint64 challengedTile,
+        uint32 sTile,
+        uint256 index,
+        bytes32[] calldata proof
+    ) external pure returns (bool) {
+        if (index >= nLeaves) return false;
+        return merkleVerifyKeccak(partialsRoot, partialsLeafKeccak(challengedTile, sTile), index, proof);
     }
 
     // ------------------------------------------------------------------

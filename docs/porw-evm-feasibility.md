@@ -130,7 +130,7 @@ more disputes.
 
 | Alternative | On-chain cost | Trade-off |
 |---|---|---|
-| **keccak-Merkle scheme variant** | Fraud proof ≈ **1.2M gas** (sketch 967k + keccak paths ~80k + keccak tile hash ~10k + overhead) — 7× cheaper | A NEW `PORW_SCHEME_ID` with new conformance vectors; the Rust side gains a keccak tree mode; blake3 stays in the L1 research scheme. The cheapest fully-EVM-native route. |
+| **keccak scheme variant** (`aigg:porw:sketch-tile-keccak:v1` — now implemented and **measured**: fraud proof **1,106,534 gas**, opening d21 70,586, tile hash 292,189) | **7.8× cheaper** than blake3 v2 | A NEW scheme id with its own conformance vectors (`sketch-tile-keccak-v1.json`, reproduced bit-for-bit by Rust `keccak` module and Solidity); blake3 stays in the L1 research scheme. The cheapest fully-EVM-native route. Registration draft: `porw-keccak-variant-proposal.md`. |
 | **Assembly BLAKE3** | Fraud proof ≈ 1.5–2.5M gas (est.) | Same scheme id (pure implementation change); higher audit burden for the hash port. |
 | **ZK verifier** (SNARK over sketch + blake3 paths) | ~300k–500k gas verify (Groth16/PLONK class) | Off-chain proving infrastructure and latency; circuit for 69 blake3 compressions + 1024-word sketch is moderate; enters as a new pinned verifier per §12.3. Justified only if dispute volume makes 1–8M-gas disputes material. |
 | **TEE-vendor / approved attestation adapters** | ~3–10k gas (signature checks) | Different confidence class (`TEE-attested`, spec §4.4) — not a byte-level fraud proof; acceptable only where the deployment's policy accepts that trust class, and orthogonal to pillar-C disputes. |
@@ -151,16 +151,21 @@ Solidity verifier — semantics proven bit-identical to the reference —
 verifies the worst dispute object at 8.6M gas (16.6% of one Auto EVM
 block), on a path that executes only during disputes, with spam priced by
 challenger deposits and congestion capacity three orders of magnitude
-above honest dispute rates. Two independent, already-specified routes
-(keccak scheme variant; assembly BLAKE3) reduce the worst case to
-~1.2–2.5M gas if dispute volume ever warrants it, and a ZK verifier
-remains available behind the same pinning discipline.
+above honest dispute rates.
 
-Recommended for the pilot's months 3–4 decision: adopt the **direct
-verifier now** (numbers above), and take the **keccak-Merkle scheme
-variant** to the aigg-spec process as the designated cost-reduction step —
-it is the only alternative that is simultaneously 7× cheaper, fully
-EVM-native, and free of new infrastructure or new trust classes.
+**Decision (taken):** the **direct verifier is adopted now**, and the
+**keccak scheme variant is the designated cost-reduction step**, to be
+registered through the aigg-spec process. The variant is no longer an
+estimate: it is implemented on both sides (Rust
+`subspace_proof_of_residency::keccak`, Solidity keccak entry points),
+pinned by its own conformance vectors
+(`conformance/sketch-tile-keccak-v1.json`), and **measured at 1,106,534
+gas (2.1% of a block)** for the full fraud proof — 7.8× below the blake3
+scheme, with the residual cost dominated by the scheme's irreducible
+sketch math. The registration draft for the aigg-spec PR is
+[`porw-keccak-variant-proposal.md`](porw-keccak-variant-proposal.md).
+A ZK verifier remains available behind the same pinning discipline if
+ever warranted.
 
 ## Appendix: environment
 

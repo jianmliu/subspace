@@ -21,6 +21,7 @@ mutable research branch name*. The release unit here is the scheme:
 | Scheme id | Conformance vectors | Git tag |
 |---|---|---|
 | `aigg:porw:sketch-tile:v2` | `crates/subspace-proof-of-residency/conformance/sketch-tile-v2.json` | `porw-scheme/v2.0.0` |
+| `aigg:porw:sketch-tile-keccak:v1` (adopted cost-reduction step for the EVM pilot; registration draft `porw-keccak-variant-proposal.md`) | `crates/subspace-proof-of-residency/conformance/sketch-tile-keccak-v1.json` | `porw-scheme-keccak/v1.0.0` |
 
 Tags are immutable release points; contract repositories pin the tag (or
 vendored fixture + its hash), never the branch. A semantic change to the

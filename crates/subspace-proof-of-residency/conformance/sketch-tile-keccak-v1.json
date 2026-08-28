@@ -1,0 +1,72 @@
+{
+  "scheme": {
+    "id": "aigg:porw:sketch-tile-keccak:v1",
+    "digest_keccak256": "0x718b2eb3b33a6d18d904363ee1cc2fb797e344af10132ebfd93aef8d5d72e4b4"
+  },
+  "params": {
+    "tile_bytes": 4096,
+    "tile_words": 1024,
+    "golden32": "0x9e3779b9",
+    "coverage_order": "strictly ascending tile index",
+    "hash": "keccak256",
+    "note": "sketch math identical to sketch-tile:v2; every hash (leaves, nodes, slot seed, scheme digest) is keccak256; ticket expansion is not part of this variant"
+  },
+  "reference_buffer": {
+    "formula": "buf[i] = ((i * 2654435761) >> 7) & 0xFF, wrapping u64 arithmetic, i in 0..n_tiles*tile_bytes",
+    "n_tiles": 4,
+    "keccak256": "0x90f004c50f802d0bc6f80193e6ed3d48581e35648cb1c96c78d48f5c36c63140"
+  },
+  "slot_seed_derivation": {
+    "global_challenge": "0x0909090909090909090909090909090909090909090909090909090909090909",
+    "device_id": "0x0303030303030303030303030303030303030303030303030303030303030303",
+    "slot_seed": 1663756538
+  },
+  "sketches": [
+    { "slot_seed": 1663756538, "per_tile": [795232566, 641493338, 985004562, 4186940540] }
+  ],
+  "weights_tree": {
+    "leaves": [
+      "0x3e50b5bf5ee971f084e3eaf064df0f93d71a96fb409e9fe6b199a9ee8b3524d9",
+      "0xfeb9a6f45d542f94f3120634b153b970b7d5a820366c0caa0c1c3324111872b5",
+      "0xaf6225bc93a62c4ff64f947e6f098749d56c997913085a0697faee7248ecee78",
+      "0x2851aa0cbf9f9232d6dfe2cc75a14fe575d90f0e4b2b04a728a4ddb4cd392a4b"
+    ],
+    "root": "0xaf9572c512a31d642b93e224a9a87813e3905848f4148422b407c1fc83fc48d3"
+  },
+  "tampered_commitment_scenario": {
+    "coverage": [1, 3],
+    "honest_s_tile_for_tile_3": 4186940540,
+    "committed_s_tiles": [641493338, 4186943441],
+    "partials_leaves": [
+      "0x1c84cc0a8f974d333948e32e6b8c272d1a1f919753bc3f3443a09270f935cabe",
+      "0xee8cd79465b30b6533601aa7d31dfbae744d410cda1fa13cb28c063855cad7f3"
+    ],
+    "partials_root": "0x52d56c14e8b296b35974b521c1d4911b938c837d45a2c142bcf3e48483cca7b0",
+    "opening_committed_tile_3": {
+      "leaf_index": 1,
+      "proof": [
+        "0x1c84cc0a8f974d333948e32e6b8c272d1a1f919753bc3f3443a09270f935cabe"
+      ],
+      "expected": "verifies; opened value 4186943441 != recomputed 4186940540 => TileFraudProof verdict Fraud"
+    },
+    "non_inclusion_tile_2": {
+      "left":  { "tile_idx": 1, "s_tile": 641493338, "index": 0 },
+      "right": { "tile_idx": 3, "s_tile": 4186943441, "index": 1 },
+      "expected": "adjacent bracket verifies => proven not committed"
+    },
+    "fraud_proof_tile_3": {
+      "tile_idx": 3,
+      "claimed_s_tile": 4186943441,
+      "partials_index": 1,
+      "partials_proof": [
+        "0x1c84cc0a8f974d333948e32e6b8c272d1a1f919753bc3f3443a09270f935cabe"
+      ],
+      "tile_bytes": "generate tile 3 from reference_buffer.formula",
+      "weights_proof": [
+        "0xaf6225bc93a62c4ff64f947e6f098749d56c997913085a0697faee7248ecee78",
+        "0x2582a60c0d95e91fa3011a68d031cd7163c8218b670f96242ab28508b80de9b9"
+      ],
+      "expected_verdict": "Fraud"
+    }
+  }
+}

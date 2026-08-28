@@ -13979,6 +13979,7 @@ dependencies = [
  "blake3",
  "parity-scale-codec",
  "scale-info",
+ "sha3",
 ]
 
 [[package]]
