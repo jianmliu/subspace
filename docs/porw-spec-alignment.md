@@ -8,10 +8,24 @@
 `proposals/ai3/ai3-domain-incentive-proposal.md` (the separate GPU-Domain
 alternative, which names this branch as the *Consensus and PoRW reference
 branch*), and
-`docs/superpowers/specs/2026-08-27-ai3-contract-proposal-design.md` (the
-**approved** design for the *AI3 Verifiable Compute Market Pilot* — the
-contract route this alignment tracks; full proposal forthcoming at
-`proposals/ai3/ai3-verifiable-compute-market-proposal.md`).
+`proposals/ai3/ai3-verifiable-compute-market-proposal.md` (the
+**published** *AI3 Verifiable Compute Market Pilot* proposal — the
+contract route this alignment tracks; its approved design brief is
+`docs/superpowers/specs/2026-08-27-ai3-contract-proposal-design.md`).
+
+**Release requirement (proposal §8.1):** the proposal names this branch as
+the current research reference and states that *production contracts must
+depend on released verifier interfaces and conformance vectors, not on a
+mutable research branch name*. The release unit here is the scheme:
+
+| Scheme id | Conformance vectors | Git tag |
+|---|---|---|
+| `aigg:porw:sketch-tile:v2` | `crates/subspace-proof-of-residency/conformance/sketch-tile-v2.json` | `porw-scheme/v2.0.0` |
+
+Tags are immutable release points; contract repositories pin the tag (or
+vendored fixture + its hash), never the branch. A semantic change to the
+sketch/commitment rules is a new scheme id, a new fixture, and a new tag —
+v2 artifacts are never edited in place (the drift test enforces this).
 
 `aigg-spec` is the canonical home of the chain-neutral MEP/PoRW
 specifications. Per its §10.9, **this repository is the PoRW research and
@@ -187,12 +201,19 @@ vectors across numpy / Triton / Rust (`porw-poc/` and
 `cross_language_sketch_vectors`); these are the natural seed for the spec's
 `conformance/cross-language/` fixtures.
 
-## 8. EVM-deployment considerations (feasibility gate, spec EVM doc §9.5)
+## 8. EVM-deployment considerations (feasibility gate)
 
 The deployment target is contracts on the **existing** EVM Domain — no new
-Domain runtime. Two real frictions between this branch's primitives and
-cheap EVM verification must be decided at the contract layer, not papered
-over:
+Domain runtime. The pilot proposal (§8.4) makes the gate explicit and
+fail-closed: before production incentives, published benchmarks are
+required for direct EVM verification cost, optimistic response/challenge
+cost, proof size and calldata, worst-case dispute congestion, verifier
+upgrade and emergency-disable behavior, and alternative ZK / TEE-vendor /
+approved attestation adapters — and *if no verifier meets the cost and
+trust requirements, production PoRW rewards remain disabled; a roadmap
+date cannot override the gate*. Two real frictions between this branch's
+primitives and cheap EVM verification must be decided at the contract
+layer, not papered over:
 
 1. **Signature suite.** `PorwSolution` here is bound by an **ed25519** node
    key (`sp_core::ed25519`, natural on Substrate). The EVM has no ed25519
