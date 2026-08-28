@@ -22,14 +22,19 @@ The spec generalizes PoRW away from any single chain. Two postures coexist:
 | Posture | Where PoRW output goes | Status |
 |---|---|---|
 | **L1 dual-track consensus** (this branch's research vehicle) | PoRW solutions author blocks on a Subspace-derived chain (VRAM track beside PoAS) | Implemented end-to-end on CPU; documented in `proof-of-resident-weights.md` |
-| **GPU Domain / EVM Worker protocol** (aigg-spec productization) | Signed solutions aggregate into an `EpochPoRWRoot`; capacity is an epoch-scoped *fact* consumed by incentive/eligibility policy — **never block authorship, never consumed by execution** | Specified in aigg-spec; reuses this branch's verifier, registry, audit, and escrow machinery per AI3 proposal §14.2 |
+| **Contracts on the existing EVM Domain** (aigg-spec productization) | Signed solutions aggregate into an `EpochPoRWRoot`; contracts on the **existing** EVM Domain (Auto EVM — no new Domain runtime) verify commitments, run the challenge window, and expose capacity as an epoch-scoped *fact* consumed by incentive/eligibility policy — **never block authorship, never consumed by execution** | Specified in aigg-spec (`evm-compute-market-protocol.md` §9); reuses this branch's verifier, registry, audit, and escrow semantics |
 
-The AI3 proposal is explicit: *"Do not modify PoAS or PoAS rewards for this
-plan"* and *"[the experimental PoRW branch] must be adapted from alternative
-main-chain block authorship into a GPU Domain Worker protocol."* The
-consensus experiment stays valuable as the research testbed in which the
-primitives are hardened; the productized deployment consumes the same
-primitives behind the spec's interfaces.
+The productization decision (latest): *deploy on the existing EVM Domain,
+do not develop a new Domain.* This matches the EVM protocol doc's own
+feasibility ordering (§9.5): if direct on-contract verification is too
+expensive, the preferred escalation is batching → proof redesign → a
+succinct verifier → an optional precompile; *"creating a dedicated GPU
+Domain remains a last resort rather than a prerequisite."* PoAS and the
+Domain framework are untouched. The consensus experiment stays valuable as
+the research testbed in which the primitives are hardened; the EVM
+contracts consume the same primitives behind the spec's interfaces, with
+`ai3-inference` as the contract reference home (spec §10.2) and this repo
+as the primitive/verifier reference and conformance-vector source.
 
 ## 2. Verifier surface: `IPoRWVerifier`
 
@@ -149,25 +154,61 @@ vectors across numpy / Triton / Rust (`porw-poc/` and
 `cross_language_sketch_vectors`); these are the natural seed for the spec's
 `conformance/cross-language/` fixtures.
 
-## 8. Gaps / next adaptations (per AI3 proposal §14.2)
+## 8. EVM-deployment considerations (feasibility gate, spec EVM doc §9.5)
 
-1. **GPU Domain runtime**: register a Domain under the existing
-   `pallet-domains` framework and move Worker-facing PoRW there, leaving
-   PoAS untouched. The registry/attestation/audit/escrow pallets port with
-   naming changes; block authorship (`sc-consensus-subspace::porw`,
-   `PorwPreDigest`, seals) stays in the L1 research track only.
+The deployment target is contracts on the **existing** EVM Domain — no new
+Domain runtime. Two real frictions between this branch's primitives and
+cheap EVM verification must be decided at the contract layer, not papered
+over:
+
+1. **Signature suite.** `PorwSolution` here is bound by an **ed25519** node
+   key (`sp_core::ed25519`, natural on Substrate). The EVM has no ed25519
+   precompile on most chains; the cheap native path is secp256k1
+   `ecrecover`. The spec anticipates this: `WorkerRegistration` carries
+   `node_key` + `attestation_scheme` versioned via `VerifierRegistry`, and
+   `PORW_SCHEME_ID` deliberately covers the sketch/commitment semantics,
+   **not** the signature suite. The EVM deployment should register
+   secp256k1 node keys and verify solutions via `ecrecover`; the sketch,
+   Merkle, opening, and fraud-proof semantics are unchanged and keep the
+   same scheme id.
+2. **Hash function.** The tile Merkle commitments here use **blake3**; the
+   EVM's native hash is keccak256, and Solidity blake3 costs real gas. Two
+   admissible resolutions, both spec-clean: (a) pay the blake3 cost only in
+   disputes — the normal path verifies signatures over an `EpochPoRWRoot`
+   and never hashes tiles, and the spec's stance is "expensive computation
+   occurs only during disputes"; (b) register a keccak-Merkle scheme
+   variant for EVM deployments — which is a **new** `PORW_SCHEME_ID`, with
+   its own conformance vectors, never a reinterpretation of v2. Benchmark
+   (a) first per the §9.5 ordering (batching → proof redesign → succinct
+   verifier → optional precompile).
+3. **Calldata for tile fraud proofs**: a disputed tile is 4 KiB of
+   calldata plus two Merkle paths — bounded and dispute-only; the epoch
+   normal path submits only the root and bounded metadata.
+
+## 9. Gaps / next adaptations
+
+1. **EVM contract surface** (home: `ai3-inference`, spec §10.2): Solidity
+   `PoRWEpochRegistry` / `ChallengeManager` / verifier implementing the
+   dispute list of §2 against the conformance vectors exported from this
+   repo. Block authorship (`sc-consensus-subspace::porw`, `PorwPreDigest`,
+   seals) stays in the L1 research track only.
 2. **Epoch claim aggregation**: an `EpochPoRWRoot` builder over signed
-   `PorwSolution`s (for the EVM/Domain path) with openings compatible with
-   `verify_opening_response`.
-3. **MEP primitives**: ModelManifest / MEP / MEP-vote / incentive-vault
-   objects (spec §6.2, §6.11–6.13) — currently only `weight_root`-keyed
-   `ModelInfo` with demand-EMA weights exists here.
-4. **Capacity non-duplication**: the simultaneous-residency rule of
+   `PorwSolution`s with openings compatible with
+   `verify_opening_response` (aggregator is untrusted for correctness —
+   it cannot forge Worker signatures nor survive a valid opening/fraud
+   challenge against a wrong root).
+3. **Cross-language conformance vectors**: fixtures generated from this
+   crate that the Solidity verifier must reproduce bit-for-bit — see
+   `crates/subspace-proof-of-residency/conformance/`.
+4. **MEP primitives**: ModelManifest / MEP / MEP-vote / incentive-vault
+   objects (spec §6.2, §6.11–6.13) — contract-layer; here only
+   `weight_root`-keyed `ModelInfo` with demand-EMA weights exists.
+5. **Capacity non-duplication**: the simultaneous-residency rule of
    `CapacityUnitDefinition` — one device claiming the same VRAM bytes under
-   several MEPs/pools needs an explicit rule (today: one `device_id`, per-model
-   announcements, envelope-capped totals; a cross-model total-VRAM cap is not
-   yet enforced).
-5. **Worker pools / delegation**: spec Worker Pool policy objects; this
+   several MEPs/pools needs an explicit rule (today: one `device_id`,
+   per-model announcements, envelope-capped totals; a cross-model
+   total-VRAM cap is not yet enforced).
+6. **Worker pools / delegation**: spec Worker Pool policy objects; this
    branch has only the bounded sqrt stake scaling on the L1.
-6. **Read-only facts API**: events/APIs for an external incentive controller
-   (spec fact envelopes with provenance and expiry).
+7. **Read-only facts API**: events/APIs for an external incentive
+   controller (spec fact envelopes with provenance and expiry).

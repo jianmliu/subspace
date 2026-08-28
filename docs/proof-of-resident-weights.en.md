@@ -9,13 +9,15 @@ Status: research draft v0.4 (2026-08)
 
 > **Ecosystem positioning** (2026-08): the chain-neutral MEP/PoRW
 > specifications now live in
-> [`aigg-spec`](https://github.com/jianmliu/aigg-spec) (modular interfaces,
-> EVM deployment, AI3 Domain proposal). Per its §10.9 this repository is the
-> **PoRW research and implementation reference**: the L1 dual-track
-> consensus described here is the research vehicle, while the
-> productization path follows aigg-spec as a GPU Domain / EVM Worker
-> protocol (PoAS untouched), reusing this branch's verifier, registry,
-> audit, and escrow components. The item-by-item mapping and gaps are in
+> [`aigg-spec`](https://github.com/jianmliu/aigg-spec). Per its §10.9 this
+> repository is the **PoRW research and implementation reference**: the L1
+> dual-track consensus described here is the research vehicle, while the
+> productization path per aigg-spec deploys **as contracts on the existing
+> EVM Domain** (no new Domain, PoAS untouched) — signed solutions
+> aggregate off-chain into an `EpochPoRWRoot`, expensive verification runs
+> only in disputes, reusing this branch's verifier, registry, audit, and
+> escrow semantics. The item-by-item mapping, EVM feasibility
+> considerations, and gaps are in
 > [`porw-spec-alignment.md`](porw-spec-alignment.md).
 
 > v0.2 changes: the "dedicated sweep" mode is removed — auditing rides

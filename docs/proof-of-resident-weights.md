@@ -8,11 +8,12 @@
 > 本中文版为规范版本，两版有出入时以中文为准。
 
 > **生态定位**（2026-08）：链中立的 MEP/PoRW 规范已迁移至
-> [`aigg-spec`](https://github.com/jianmliu/aigg-spec)（模块化接口、EVM 部署、
-> AI3 Domain 提案）。本仓库按其 §10.9 定位为 **PoRW 研究与实现参考**：
-> 本文的 L1 双轨共识是研究载体；产品化路径按 aigg-spec 走 GPU Domain /
-> EVM Worker 协议（不改 PoAS），复用本分支的验证器、注册表、审计与托管
-> 组件。逐条映射与差距见
+> [`aigg-spec`](https://github.com/jianmliu/aigg-spec)。本仓库按其 §10.9
+> 定位为 **PoRW 研究与实现参考**：本文的 L1 双轨共识是研究载体；产品化
+> 路径按 aigg-spec 以**合约形式部署在现有 EVM Domain 上**（不新建
+> Domain、不改 PoAS）——签名 solution 链下聚合为 `EpochPoRWRoot` 上链,
+> 争议时才做贵验证,复用本分支的验证器、注册表、审计与托管语义。
+> 逐条映射、EVM 可行性考量与差距见
 > [`porw-spec-alignment.md`](porw-spec-alignment.md)。
 
 > v0.2 变更：删除「专用扫描」模式——审计完全跟随真实推理（单一模式）；
