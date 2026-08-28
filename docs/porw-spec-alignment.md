@@ -203,6 +203,14 @@ vectors across numpy / Triton / Rust (`porw-poc/` and
 
 ## 8. EVM-deployment considerations (feasibility gate)
 
+> **The gate has measured evidence**: see
+> [`porw-evm-feasibility.md`](porw-evm-feasibility.md) — a Solidity port of
+> the full dispute path (`porw-evm-bench/`, 13 differential tests
+> bit-identical to the Rust reference, 9 gas benchmarks at realistic tree
+> depths against Auto EVM's 52M block gas limit). Headline: a full tile
+> fraud proof verifies at **8.6M gas (16.6% of a block)** unoptimized,
+> dispute-only; a keccak scheme variant would cut it to ~1.2M.
+
 The deployment target is contracts on the **existing** EVM Domain — no new
 Domain runtime. The pilot proposal (§8.4) makes the gate explicit and
 fail-closed: before production incentives, published benchmarks are
