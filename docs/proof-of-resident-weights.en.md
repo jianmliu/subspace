@@ -12,11 +12,15 @@ Status: research draft v0.4 (2026-08)
 > [`aigg-spec`](https://github.com/jianmliu/aigg-spec). Per its §10.9 this
 > repository is the **PoRW research and implementation reference**: the L1
 > dual-track consensus described here is the research vehicle, while the
-> productization path per aigg-spec deploys **as contracts on the existing
-> EVM Domain** (no new Domain, PoAS untouched) — signed solutions
-> aggregate off-chain into an `EpochPoRWRoot`, expensive verification runs
-> only in disputes, reusing this branch's verifier, registry, audit, and
-> escrow semantics. The item-by-item mapping, EVM feasibility
+> productization path — the approved *AI3 Verifiable Compute Market
+> Pilot* design — deploys **as ordinary contracts on the existing Auto
+> EVM Domain** (no new Domain; PoAS/PoT/main-chain issuance untouched):
+> signed solutions aggregate off-chain into an `EpochPoRWRoot`, expensive
+> verification runs only in disputes, reusing this branch's verifier,
+> registry, audit, and escrow semantics. The pilot's reward math consumes
+> only the cryptographically hard coverage/residency half of a solution
+> and does not use `m_t` (the soft-trust surface does not exist in the
+> productized posture). The item-by-item mapping, EVM feasibility
 > considerations, and gaps are in
 > [`porw-spec-alignment.md`](porw-spec-alignment.md).
 

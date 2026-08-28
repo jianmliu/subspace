@@ -5,8 +5,13 @@
 **Upstream spec:** [`jianmliu/aigg-spec`](https://github.com/jianmliu/aigg-spec)
 — `docs/architecture/mep-porw-modular-interfaces.md` (interface spec),
 `docs/architecture/evm-compute-market-protocol.md` (EVM deployment),
-`proposals/ai3/ai3-domain-incentive-proposal.md` (AI3 route, which names this
-branch as the *Consensus and PoRW reference branch*).
+`proposals/ai3/ai3-domain-incentive-proposal.md` (the separate GPU-Domain
+alternative, which names this branch as the *Consensus and PoRW reference
+branch*), and
+`docs/superpowers/specs/2026-08-27-ai3-contract-proposal-design.md` (the
+**approved** design for the *AI3 Verifiable Compute Market Pilot* — the
+contract route this alignment tracks; full proposal forthcoming at
+`proposals/ai3/ai3-verifiable-compute-market-proposal.md`).
 
 `aigg-spec` is the canonical home of the chain-neutral MEP/PoRW
 specifications. Per its §10.9, **this repository is the PoRW research and
@@ -24,17 +29,45 @@ The spec generalizes PoRW away from any single chain. Two postures coexist:
 | **L1 dual-track consensus** (this branch's research vehicle) | PoRW solutions author blocks on a Subspace-derived chain (VRAM track beside PoAS) | Implemented end-to-end on CPU; documented in `proof-of-resident-weights.md` |
 | **Contracts on the existing EVM Domain** (aigg-spec productization) | Signed solutions aggregate into an `EpochPoRWRoot`; contracts on the **existing** EVM Domain (Auto EVM — no new Domain runtime) verify commitments, run the challenge window, and expose capacity as an epoch-scoped *fact* consumed by incentive/eligibility policy — **never block authorship, never consumed by execution** | Specified in aigg-spec (`evm-compute-market-protocol.md` §9); reuses this branch's verifier, registry, audit, and escrow semantics |
 
-The productization decision (latest): *deploy on the existing EVM Domain,
-do not develop a new Domain.* This matches the EVM protocol doc's own
-feasibility ordering (§9.5): if direct on-contract verification is too
-expensive, the preferred escalation is batching → proof redesign → a
-succinct verifier → an optional precompile; *"creating a dedicated GPU
-Domain remains a last resort rather than a prerequisite."* PoAS and the
-Domain framework are untouched. The consensus experiment stays valuable as
-the research testbed in which the primitives are hardened; the EVM
-contracts consume the same primitives behind the spec's interfaces, with
-`ai3-inference` as the contract reference home (spec §10.2) and this repo
-as the primitive/verifier reference and conformance-vector source.
+The productization decision (approved in the *AI3 Verifiable Compute
+Market Pilot* design): *ordinary EVM contracts on the existing Auto EVM
+Domain; no new GPU Domain; Auto EVM is the only canonical protocol
+instance of the first program; PoAS, PoT, main-chain issuance, and Farmer
+rewards untouched.* This matches the EVM protocol doc's own feasibility
+ordering (§9.5): if direct on-contract verification is too expensive, the
+preferred escalation is batching → proof redesign → a succinct verifier →
+an optional precompile; *"creating a dedicated GPU Domain remains a last
+resort rather than a prerequisite."* The consensus experiment stays
+valuable as the research testbed in which the primitives are hardened; the
+EVM contracts consume the same primitives behind the spec's interfaces
+(pilot module naming: `PoRWClaimManager` / `PoRWChallengeManager`, beside
+`ModelRegistry` / `MEPRegistry`, `AI3StakeVault` / `DelegationVault`,
+`ReceiptRegistry` / `InferenceEscrow`, `ContextRegistry`, and the three
+incentive vaults), with `ai3-inference` as the contract reference home
+(spec §10.2) and this repo as the primitive/verifier reference and
+conformance-vector source.
+
+**Reward semantics differ per posture — and the pilot eliminates the m_t
+soft spot.** The L1 lottery weights by `|C_t| × m_t` (coverage × service
+multiplier), where `m_t` is the design's one TEE-trusted, envelope-capped
+assertion. The pilot's anti-farming rules go the other way: the AI3 budget
+per period is fixed; *"raw volume is not a reward multiplier"*;
+self-generated tasks cannot grow the budget; shares are bounded by
+verified capacity, availability, service-quality gates, stake, and
+concentration caps. Consequently the pilot's reward math consumes only the
+**cryptographically hard half** of a solution (coverage/residency — the
+sketch-backed part) and does not use `m_t` at all; commercial upside for
+real service comes from stablecoin settlement instead. `m_t` remains an
+L1-research concept and an off-chain telemetry/quality signal — the
+productized posture simply has no trusted-multiplier surface to attack.
+
+**Delivery mapping (pilot months 1–4):** the months 1–2 deliverables
+include *conformance fixtures* — seeded from
+`crates/subspace-proof-of-residency/conformance/`; months 3–4 deliver
+*residency claims, challenges, bounded slashing, capacity views, verifier
+benchmarks, and an explicit EVM feasibility report* — the semantics for
+all of which are the pallet/primitives behavior mapped in §§2–4 below,
+and the feasibility questions are §8.
 
 ## 2. Verifier surface: `IPoRWVerifier`
 
